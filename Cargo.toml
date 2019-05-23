@@ -5,6 +5,7 @@ authors = ["Ashkan Kiani <ashkan.k.kiani@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+matches = "0.1.8"
 
 [dev-dependencies]
 derive_more = "0.14.0"

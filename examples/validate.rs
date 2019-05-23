@@ -5,6 +5,10 @@
 
 #![warn(const_err)]
 
+use parser::section::Section;
+use parser::tokenizer::{compress_next_token, utils::is_whitespace};
+use parser::validator::{ValidationError, ValidationState, Validator};
+
 use std::io::{self, stdin, stdout, Read, Write};
 
 use derive_more::From;
@@ -12,7 +16,6 @@ use derive_more::From;
 #[derive(Debug, From)]
 enum Error {
     Io(std::io::Error),
-    ChanRecv(chan::RecvError),
     Validation(ValidationError),
 }
 
@@ -21,7 +24,7 @@ fn validator_entrypoint(input: &str) -> Result<(), Error> {
 
     let mut section = Section::new(input);
     let mut last_state = ValidationState::Incomplete;
-    while let Ok(Some(token)) = next_token(&mut section) {
+    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }

@@ -1,3 +1,5 @@
+use crate::tokenizer::Token;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ValidationContext {
     // TODO use Value and combine ArrayValue and ObjectEntryValue
@@ -241,4 +243,3 @@ impl Validator {
     //     }
     // }
 }
-
