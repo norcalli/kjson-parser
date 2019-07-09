@@ -195,10 +195,6 @@ impl<'a> AsRef<str> for ByteSection<'a> {
     }
 }
 
-// trait SectionHandler {
-//     fn find(s: &mut Section<'_>);
-// }
-
 #[cfg(test)]
 mod tests {
     use super::*;

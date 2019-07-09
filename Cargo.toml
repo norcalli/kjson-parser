@@ -9,3 +9,4 @@ matches = "0.1.8"
 
 [dev-dependencies]
 derive_more = "0.14.0"
+jemallocator = "0.3.2"

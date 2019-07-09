@@ -5,6 +5,9 @@
 
 #![warn(const_err)]
 
+#[global_allocator]
+static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 use parser::section::Section;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace};
 use parser::validator::{ValidationError, ValidationState, Validator};
@@ -47,7 +50,7 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
         }
         token.print(&mut stdout)?;
         if ValidationState::Complete == validator.process_token(&token)? {
-            write!(stdout, "{}", '\n')?;
+            write!(stdout, "{}", b'\n')?;
         }
     }
     Ok(())
