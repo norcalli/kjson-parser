@@ -15,12 +15,54 @@ pub enum ValidationContext {
     ObjectEnd,
 }
 
+impl ValidationContext {
+    #[inline]
+    pub fn in_array(self) -> bool {
+        use ValidationContext::*;
+        match self {
+            ArrayStart | ArrayValue | ArrayComma => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn in_object(self) -> bool {
+        use ValidationContext::*;
+        match self {
+            ObjectStart | ObjectEntryKey | ObjectEntryColon | ObjectEntryValue
+            | ObjectEntryComma => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn in_value(self) -> bool {
+        use ValidationContext::*;
+        match self {
+            ArrayValue | ObjectEntryValue => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn before_value(self) -> bool {
+        use ValidationContext::*;
+        match self {
+            ArrayValue | ObjectEntryValue => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ValidationState {
     Complete,
+    // Incomplete(Option<JsonType>),
+    // TODO emit object on closing a subobject?
     Incomplete,
-    Ignored, // TODO keep or just use Complete?
-             // Invalid,
+    // TODO keep Ignored or just use Complete?
+    Ignored,
+    // Invalid,
 }
 
 #[derive(Debug)]
@@ -39,12 +81,13 @@ pub enum ValidationError {
     /// in which something else was expected. You can use the method `valid_sequents`
     /// to figure out what could have been valid contexts to follow.
     Invalid(Option<ValidationContext>),
+    UnexpectedEndOfInput,
 }
 
 impl ValidationContext {
     // TODO self or &self?
     // const fn valid_sequents(&self) -> &'static [ValidationContext] {
-    fn valid_sequents(&self) -> &'static [ValidationContext] {
+    fn valid_sequents(self) -> &'static [ValidationContext] {
         use ValidationContext::*;
         match self {
             ArrayStart => &[ArrayValue, ArrayEnd],
@@ -61,7 +104,7 @@ impl ValidationContext {
     }
 
     // TODO self or &self?
-    fn is_valid_sequent(&self, next: &Self) -> bool {
+    fn is_valid_sequent(self, next: Self) -> bool {
         use ValidationContext::*;
         match (self, next) {
             (ArrayStart, ArrayValue)
@@ -88,10 +131,22 @@ impl ValidationContext {
     }
 }
 
+#[derive(Default)]
 pub struct Validator {
+    // TODO benchmark version with only Vec + .last()
     current_context: Option<ValidationContext>,
     context_stack: Vec<ValidationContext>,
 }
+
+// TODO implement subcontext?
+
+// trait ContextStack {
+//     fn current(&self) -> &Option<ValidationContext>;
+//     fn current_context(&mut self) -> &Option<ValidationContext>;
+//     fn pop_until(&mut self, target: ValidationContext) -> bool;
+//     fn pop(&mut self) -> Option<ValidationContext>;
+//     fn push(&mut self);
+// }
 
 impl Validator {
     #[inline]
@@ -112,6 +167,14 @@ impl Validator {
         }
     }
 
+    pub fn current_context(&self) -> Option<ValidationContext> {
+        self.current_context
+    }
+
+    // This method is called after we have finished closing something. After
+    // closing something, it can either be a value in a larger context, or the
+    // end of the input. It then represents the closed object as a subelement
+    // in the larger context depending on what the context was.
     #[inline]
     fn check_completion(&mut self) -> Result<ValidationState, ValidationError> {
         use ValidationContext::*;
@@ -142,6 +205,14 @@ impl Validator {
         self.current_context = Some(next);
         self.context_stack.push(current);
         Ok(ValidationState::Incomplete)
+    }
+
+    pub fn finish(&mut self) -> Result<ValidationState, ValidationError> {
+        if self.current_context.is_none() && self.context_stack.is_empty() {
+            Ok(ValidationState::Complete)
+        } else {
+            Err(ValidationError::UnexpectedEndOfInput)
+        }
     }
 
     #[inline]

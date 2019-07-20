@@ -47,8 +47,10 @@ pub enum Token<'a> {
     Null,
 }
 
+use crate::JsonType;
+
 impl Token<'_> {
-    pub fn to_owned(self) -> Token<'static> {
+    pub fn into_owned(self) -> Token<'static> {
         match self {
             Token::Spaces(x) => Token::Spaces(x),
             Token::Whitespace(x) => Token::Whitespace(x),
@@ -75,25 +77,67 @@ impl Token<'_> {
     }
 
     #[inline]
+    pub fn is_close(&self) -> bool {
+        match self {
+            Token::ArrayClose | Token::ObjectClose => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    pub fn is_open(&self) -> bool {
+        match self {
+            Token::ArrayOpen | Token::ObjectOpen => true,
+            _ => false,
+        }
+    }
+
+    pub fn value_type(&self) -> Option<crate::JsonType> {
+        Some(match self {
+            Token::String(_) => JsonType::String,
+            Token::Number(_) => JsonType::Number,
+            Token::ObjectOpen | Token::ObjectClose => JsonType::Object,
+            Token::ArrayOpen | Token::ArrayClose => JsonType::Array,
+            Token::Null => JsonType::Null,
+            Token::True | Token::False => JsonType::Bool,
+            _ => return None,
+        })
+    }
+
+    #[inline]
+    pub fn is_value_start(&self) -> bool {
+        match self {
+            Token::False
+            | Token::True
+            | Token::Null
+            | Token::Number(_)
+            | Token::String(_)
+            | Token::ArrayOpen
+            | Token::ObjectOpen => true,
+            _ => false,
+        }
+    }
+
+    #[inline]
     pub fn print<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         match self {
             Token::String(x) | Token::Number(x) => write!(writer, "{}", x),
             Token::Whitespace(x) => write!(writer, "{}", x),
             Token::Spaces(x) => {
                 for _ in 0..*x {
-                    write!(writer, "{}", ' ')?;
+                    writer.write_all(b" ")?;
                 }
                 Ok(())
             }
-            Token::ObjectOpen => write!(writer, "{}", '{'),
-            Token::ObjectClose => write!(writer, "{}", '}'),
-            Token::Comma => write!(writer, "{}", ','),
-            Token::Colon => write!(writer, "{}", ':'),
-            Token::ArrayOpen => write!(writer, "{}", '['),
-            Token::ArrayClose => write!(writer, "{}", ']'),
-            Token::Null => write!(writer, "{}", "null"),
-            Token::False => write!(writer, "{}", "false"),
-            Token::True => write!(writer, "{}", "true"),
+            Token::ObjectOpen => writer.write_all(b"{"),
+            Token::ObjectClose => writer.write_all(b"}"),
+            Token::Comma => writer.write_all(b","),
+            Token::Colon => writer.write_all(b":"),
+            Token::ArrayOpen => writer.write_all(b"["),
+            Token::ArrayClose => writer.write_all(b"]"),
+            Token::Null => writer.write_all(b"null"),
+            Token::False => writer.write_all(b"false"),
+            Token::True => writer.write_all(b"true"),
         }
     }
 }
@@ -155,19 +199,19 @@ pub mod utils {
             Some('e') | Some('E') => {
                 s.next();
                 match s.peek() {
-                Some('-') | Some('+') => {
+                    Some('-') | Some('+') => {
                         s.next();
-                    if section_digits(s) == 0 {
+                        if section_digits(s) == 0 {
                             return Err(invalid_input_err(s.peek()));
+                        }
+                        Ok(s.offset() - n)
                     }
-                    Ok(s.offset() - n)
-                }
-                Some('0'..='9') => {
+                    Some('0'..='9') => {
                         s.next();
-                    section_digits(s);
-                    return Ok(s.offset() - n);
-                }
-                e => Err(invalid_input_err(e)),
+                        section_digits(s);
+                        return Ok(s.offset() - n);
+                    }
+                    e => Err(invalid_input_err(e)),
                 }
             }
             e => Err(invalid_input_err(e)),
@@ -365,7 +409,7 @@ pub mod utils {
                         }
                         s.next();
                         n += 1;
-                        if n >= 255 {
+                        if n == 255 {
                             break;
                         }
                     }
@@ -459,7 +503,7 @@ pub mod utils {
 
         #[test]
         fn section_number_matches_full() {
-            for (input, remaining) in vec![
+            for (input, remaining) in &[
                 ("1", ""),
                 ("1a", "a"),
                 ("1\n", "\n"),
@@ -642,12 +686,9 @@ pub mod utils {
             while let Some(token) = next_token(s)? {
                 assert_eq!(expected.pop().unwrap(), token);
                 println!("{:?},", token);
-                match token {
-                    Number(s) => {
-                        s.parse::<f64>().unwrap();
-                    }
-                    _ => (),
-                };
+                if let Number(s) = token {
+                    s.parse::<f64>().unwrap();
+                }
             }
 
             Ok(())
