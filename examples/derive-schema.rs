@@ -10,7 +10,7 @@ use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
 use parser::{JsonPathSegment, JsonType};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, stdin, stdout, Read, Write};
 
 use derive_more::From;
@@ -30,7 +30,8 @@ enum Error {
 
 trait Lens {}
 
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+// #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum JsonSchema {
     Object(BTreeMap<String, JsonSchema>),
     Array(Vec<JsonSchema>),
@@ -38,7 +39,7 @@ pub enum JsonSchema {
     String,
     Null,
     Bool,
-    Either(BTreeSet<JsonSchema>),
+    Either(HashMap<JsonType, JsonSchema>),
     Empty,
 }
 
@@ -63,6 +64,17 @@ impl JsonSchema {
                 }
                 &mut arr[index]
             }
+            JsonSchema::Either(ref mut inner) => {
+                let path_type = if path.is_array() {
+                    JsonType::Array
+                } else {
+                    JsonType::Object
+                };
+                inner
+                    .entry(path_type)
+                    .or_insert_with(|| path_type.into())
+                    .descend(path)
+            }
             _ => panic!("Cannot descend into not an array or object"),
         }
     }
@@ -77,6 +89,30 @@ impl JsonSchema {
             | (JsonSchema::Bool, JsonSchema::Bool) => true,
             _ => false,
         }
+    }
+
+    pub fn is_type(&self, other: JsonType) -> bool {
+        match (self, other) {
+            (JsonSchema::Object(_), JsonType::Object)
+            | (JsonSchema::Array(_), JsonType::Array)
+            | (JsonSchema::Number, JsonType::Number)
+            | (JsonSchema::String, JsonType::String)
+            | (JsonSchema::Null, JsonType::Null)
+            | (JsonSchema::Bool, JsonType::Bool) => true,
+            _ => false,
+        }
+    }
+
+    pub fn get_type(&self) -> Option<JsonType> {
+        Some(match self {
+            JsonSchema::Object(_) => JsonType::Object,
+            JsonSchema::Array(_) => JsonType::Array,
+            JsonSchema::Number => JsonType::Number,
+            JsonSchema::String => JsonType::String,
+            JsonSchema::Null => JsonType::Null,
+            JsonSchema::Bool => JsonType::Bool,
+            _ => return None,
+        })
     }
 }
 
@@ -111,28 +147,34 @@ impl JsonSchema {
     //     JsonSchema::Either(set)
     // }
 
-    pub fn either(&mut self, other: Self) -> &mut Self {
+    pub fn either(&mut self, other: JsonType) -> &mut Self {
         match self {
             JsonSchema::Empty => {
-                *self = other;
+                *self = other.into();
                 self
             }
-            JsonSchema::Either(ref mut set) => {
-                set.insert(other);
+            JsonSchema::Either(ref mut inner) => {
+                inner.entry(other).or_insert_with(|| other.into());
                 self
             }
             // TODO need to handle Object({}).either(Object({...}))
-            _ if self == &other => self,
+            // _ if self == &other => self,
+            // _ if self.is_same_type(&other) => self,
+            _ if self.is_type(other) => self,
             _ => {
-                let mut set = BTreeSet::new();
-                set.insert(other);
-                let old = std::mem::replace(self, JsonSchema::Either(set));
-                self.either(old)
+                let old = std::mem::replace(self, JsonSchema::Either(HashMap::new()));
+                if let JsonSchema::Either(ref mut inner) = self {
+                    inner.insert(old.get_type().unwrap(), old);
+                    inner.insert(other, other.into());
+                }
+                self
             }
         }
     }
 }
 
+/// # Overview
+///
 /// Inspired by this command:
 /// ```sh
 /// zephyr-ls json \
@@ -148,6 +190,21 @@ impl JsonSchema {
 /// the types.
 ///
 /// This function aims to do that explicitly.
+///
+/// # Strategies:
+///
+/// - Do what the command does and store the types for each path and then try to merge it
+/// at the end by traversing the topologically sorted paths in linearized order.
+/// - Try to build up the merge tree during the process.
+///
+/// # It should probably accept some options for questions without a single answer such as:
+///
+/// - How to deal with array elements: try to treat them as a single object or each index
+/// as individual?
+///     - Is there an automatic strategy/heuristic to decide which one is the better strategy
+///     like which one leads to a more specific schema. (specificity is a heuristic that I
+///     think I could make)
+///
 fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
     let mut stdout = stdout();
     // let mut stdout = stdout.lock();
@@ -192,7 +249,7 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
                 writeln!(stderr, "descending into {:?} at {:?}", schema, part,)?;
                 schema = schema.descend(part);
             }
-            schema.either(token.value_type().unwrap().into());
+            schema.either(token.value_type().unwrap());
             writeln!(stderr, "schema is now {:?}", schema,)?;
 
             writeln!(

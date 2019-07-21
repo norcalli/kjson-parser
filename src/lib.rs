@@ -4,7 +4,7 @@ pub mod section;
 pub mod tokenizer;
 pub mod validator;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub enum JsonType {
     Array,
     Object,
