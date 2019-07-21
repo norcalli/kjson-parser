@@ -90,7 +90,7 @@ impl JsonSchema {
                     .to_owned();
                 // *key_count.entry(key.clone()).or_default() += 1;
                 // TODO keep unwrap()?
-                inner.entry(key).or_default()
+                inner.entry(key.into_owned()).or_default()
             }
             JsonSchema::Array { ref mut inner, .. } => {
                 // TODO keep unwrap()?

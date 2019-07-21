@@ -119,6 +119,14 @@ impl Token<'_> {
     }
 
     #[inline]
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Token::String(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    #[inline]
     pub fn print<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         match self {
             Token::String(x) | Token::Number(x) => write!(writer, "{}", x),

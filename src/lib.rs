@@ -4,6 +4,9 @@ pub mod section;
 pub mod tokenizer;
 pub mod validator;
 
+use std::borrow::Cow;
+use std::fmt;
+
 #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub enum JsonType {
     Array,
@@ -14,9 +17,7 @@ pub enum JsonType {
     Null,
 }
 
-use std::borrow::{Borrow, Cow};
-
-#[derive(Debug, derive_more::Display)]
+#[derive(Clone, Debug, derive_more::Display, derive_more::From)]
 pub enum JsonPathSegment<'a> {
     // Root,
     #[display(fmt = "{}", _0)]
@@ -26,10 +27,11 @@ pub enum JsonPathSegment<'a> {
 }
 
 impl<'a> JsonPathSegment<'a> {
-    pub fn as_key(&self) -> Option<&str> {
+    pub fn as_key(&self) -> Option<Cow<'a, str>> {
         use JsonPathSegment::*;
         match self {
-            Key(ref s) => Some(s.borrow()),
+            // TODO do I need to clone?
+            Key(c) => Some(c.clone()),
             Index(_) => None,
         }
     }
@@ -71,24 +73,20 @@ impl<'a> JsonPathSegment<'a> {
     }
 }
 
-// pub type JsonPath<'a> = Vec<JsonPathSegment<'a>>;
-// pub type JsonPath<'a> = Cow<'a, [JsonPathSegment<'a>]>;
+pub const EMPTY_KEY: JsonPathSegment<'static> = JsonPathSegment::Key(Cow::Borrowed(""));
+// pub const EMPTY_INDEX: JsonPathSegment<'static> = JsonPathSegment::Index(std::usize::MAX);
 
-#[cfg(test)]
-mod tests {
+#[derive(
+    derive_more::From, derive_more::Constructor, derive_deref::Deref, derive_deref::DerefMut,
+)]
+pub struct JsonPath<'a>(Cow<'a, [JsonPathSegment<'a>]>);
 
-    // #[test]
-    // fn it_parses_a_stream() {
-    //     let tests = [
-    //         (r"1 1", [1, 1]),
-    //         (r#"1 "123""#, ["1", r#""123""#]),
-    //         (r#"1"123""#, ["1", r#""123""#]),
-    //         (r#"[1]{"a": null}"#, ["[1]", r#"{"a":null}"#]),
-    //     ];
-    // }
-
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+impl<'a> fmt::Display for JsonPath<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "@")?;
+        for part in self.0.iter() {
+            write!(f, ".{}", part)?;
+        }
+        Ok(())
     }
 }

@@ -3,7 +3,7 @@
 use parser::section::Section;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
-use parser::{JsonPathSegment, JsonType};
+use parser::{JsonPath, JsonPathSegment, JsonType};
 
 use log::*;
 use std::io::{self, stdin, Read};
@@ -19,6 +19,9 @@ enum Error {
 fn entrypoint(input: &str) -> Result<(), Error> {
     let mut validator = Validator::new();
     let mut last_state = ValidationState::Incomplete;
+
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
 
     let mut path: Vec<JsonPathSegment> = Vec::new();
 
@@ -43,21 +46,43 @@ fn entrypoint(input: &str) -> Result<(), Error> {
          *
          * token.print(&mut stdout)?;
          */
+        token.print(&mut stdout)?;
+
+        let token_value_type: Option<JsonType> = token.value_type();
 
         let current_context = validator.current_context();
 
         let token_is_start = token.is_value_start();
         let token_is_close = token.is_close();
 
-        let is_start_of_value =
-            token_is_start && current_context != Some(ValidationContext::ObjectEntryKey);
+        let is_object_key = current_context == Some(ValidationContext::ObjectEntryKey);
 
-        // Results in printing values, arrays, and objects at the start.
-        if is_start_of_value {
-            /*
-             * SKELETON: You can put code here for preorder processing of arrays/objects/values
-             * This is mostly useful for arrays/objects
-             */
+        // let is_start_of_value =
+        //     token_is_start && current_context != Some(ValidationContext::ObjectEntryKey);
+        let is_start_of_value = token_is_start && !is_object_key;
+
+        let is_end_of_value = {
+            // True if we are in a context where we just finished a value.
+            let is_context_in_value = match current_context {
+                // None covers the case where our entire value is not an array or object
+                None => true,
+                // This covers the case where we just finished processing a value.
+                Some(ref context) => context.in_value(),
+            };
+
+            (token_is_close || token_is_start) && is_context_in_value
+        };
+
+        /*
+         * DO calculations after this point
+         */
+
+        if is_object_key {
+            debug!(
+                "{} object key {:?}",
+                JsonPath::new(path.as_slice().into()),
+                token
+            );
         }
 
         /* Ordering is important here: Change the path before the post-order visit entrypoint so
@@ -75,46 +100,60 @@ fn entrypoint(input: &str) -> Result<(), Error> {
             None
         };
 
-        /* Example to calculate array_length.
-         *
-         * let array_length = container_last_segment
-         *     .and_then(|p| p.as_index())
-         *     .expect("expected index at path segment");
-         */
+        // PREORDER: Results in printing values, arrays, and objects at the start.
+        if is_start_of_value {
+            /*
+             * SKELETON: You can put code here for preorder processing of arrays/objects/values
+             * This is mostly useful for arrays/objects
+             */
 
-        let is_end_of_value = {
-            // True if we are in a context where we just finished a value.
-            let is_context_in_value = match current_context {
-                // None covers the case where our entire value is not an array or object
-                None => true,
-                // This covers the case where we just finished processing a value.
-                Some(ref context) => context.in_value(),
-            };
+            match token_value_type {
+                Some(JsonType::Object) => {
+                    info!("{} = object.start", JsonPath::new(path.as_slice().into()));
+                }
+                Some(JsonType::Array) => {
+                    info!("{} = array.start", JsonPath::new(path.as_slice().into()));
+                }
+                _ => (),
+            }
+        }
 
-            (token_is_close || token_is_start) && is_context_in_value
-        };
-
-        // This can only be the start & end if it is not a container, but a plain value.
+        // INORDER: This can only be the start & end if it is not a container, but a plain value.
         if is_start_of_value && is_end_of_value {
             /*
              * SKELETON: you can access plain values here.
              */
 
             // At this point, you have access to the path and the value
-            info!(
-                "{} = {:?}",
-                path.iter()
-                    .map(|x: &JsonPathSegment| x.to_string())
-                    .collect::<Vec<_>>()
-                    .join("."),
-                token
-            );
+            info!("{} = {:?}", JsonPath::new(path.as_slice().into()), token);
         }
 
-        // Results in printing values, arrays, and objects only at the end.
+        // POSTORDER: Results in printing values, arrays, and objects only at the end.
         if is_end_of_value {
             // SKELETON: You can put code here for postorder processing of arrays/objects/values
             // This is mostly useful for arrays/objects
+
+            match token_value_type {
+                Some(JsonType::Object) => {
+                    let last_key = container_last_segment.and_then(|p| p.as_key());
+                    info!(
+                        "{} = object.end, lastkey={:?}",
+                        JsonPath::new(path.as_slice().into()),
+                        last_key,
+                    );
+                }
+                Some(JsonType::Array) => {
+                    let array_length = container_last_segment
+                        .and_then(|p| p.as_index())
+                        .expect("expected index at path segment");
+                    info!(
+                        "{} = array.end, length={}",
+                        JsonPath::new(path.as_slice().into()),
+                        array_length,
+                    );
+                }
+                _ => (),
+            }
         }
 
         /* Update the path.
@@ -128,12 +167,12 @@ fn entrypoint(input: &str) -> Result<(), Error> {
          */
         match validator.current_context() {
             Some(ValidationContext::ObjectStart) => {
-                // Push path for modification
-                path.push(JsonPathSegment::Key("".into()));
-
                 /*
                  * SKELETON: Entrypoint to start of new object.
                  */
+
+                // Push path for modification
+                path.push(parser::EMPTY_KEY);
             }
             Some(ValidationContext::ObjectEntryKey) => {
                 if let Token::String(new_key) = token {
@@ -154,7 +193,7 @@ fn entrypoint(input: &str) -> Result<(), Error> {
             Some(ValidationContext::ArrayStart) => {
                 // Set up index path for new values.
                 // If the array is empty, then this shouldn't be used.
-                path.push(JsonPathSegment::Index(0));
+                path.push(0.into());
             }
             Some(ValidationContext::ArrayValue) => {
                 // I wish I could use this instead.
@@ -181,4 +220,3 @@ fn main() -> Result<(), Error> {
     entrypoint(&buffer)?;
     Ok(())
 }
-
