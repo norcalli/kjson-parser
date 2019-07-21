@@ -35,6 +35,19 @@ trait Lens {}
 // #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[derive(Debug, Eq, PartialEq)]
 pub enum JsonSchema {
+    Empty,
+    Null,
+    Bool,
+    Number,
+    String,
+    // Depends on maximum cardinality. You could assume it's an enum depending on a user inputted
+    // maximum number which determines if it qualifies to be an enum. However, if your data
+    // samples are too few, then it will be too restrictive. Therefore, such a number must be
+    // chosen in consideration of the total number of input samples.
+    //
+    // Enum {
+    //     inner: BTreeSet<String>,
+    // },
     Object {
         inner: BTreeMap<String, JsonSchema>,
         // required: BTreeSet<String>,
@@ -46,12 +59,7 @@ pub enum JsonSchema {
         // min_length: usize,
         lengths: BTreeSet<usize>,
     },
-    Number,
-    String,
-    Null,
-    Bool,
     Either(HashMap<JsonType, JsonSchema>),
-    Empty,
 }
 
 impl Default for JsonSchema {
@@ -85,7 +93,10 @@ impl JsonSchema {
                 inner.entry(key).or_default()
             }
             JsonSchema::Array { ref mut inner, .. } => {
-                // TODO unwrap()?
+                // TODO keep unwrap()?
+                // If you set index = 0, then you are using the mode where you can treat an array
+                // as a homogeneous array.
+                // let index = 0;
                 let index = path.as_index().expect("path segment must be array type");
                 if index >= inner.len() {
                     inner.push(Default::default());
@@ -413,6 +424,19 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
             // token.value_type().is_some() && is_context_in_value
             (token_is_close || token_is_start) && is_context_in_value
         };
+
+        // It's a value.
+        if is_start_of_value && is_end_of_value {
+            // At this point, you have access to the path and the value
+            info!(
+                "{} = {:?}",
+                path.iter()
+                    .map(|x: &JsonPathSegment| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join("."),
+                token
+            );
+        }
 
         // Results in printing values, arrays, and objects only at the end.
         if is_end_of_value {
