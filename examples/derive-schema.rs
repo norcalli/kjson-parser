@@ -31,14 +31,21 @@ enum Error {
 
 trait Lens {}
 
+// TODO why did I add Ord?
 // #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[derive(Debug, Eq, PartialEq)]
 pub enum JsonSchema {
-    EmptyObject,
-    EmptyArray,
-
-    Object(BTreeMap<String, JsonSchema>),
-    Array(Vec<JsonSchema>),
+    Object {
+        inner: BTreeMap<String, JsonSchema>,
+        // required: BTreeSet<String>,
+        key_count: HashMap<String, usize>,
+        total_count: usize,
+    },
+    Array {
+        inner: Vec<JsonSchema>,
+        // min_length: usize,
+        lengths: BTreeSet<usize>,
+    },
     Number,
     String,
     Null,
@@ -54,22 +61,39 @@ impl Default for JsonSchema {
 }
 
 impl JsonSchema {
+    pub fn as_object_mut(&mut self) -> Option<&mut JsonSchema> {
+        match self {
+            JsonSchema::Object { .. } => Some(self),
+            JsonSchema::Either(ref mut inner) => inner.get_mut(&JsonType::Object),
+            _ => None,
+        }
+    }
+
     pub fn descend(&mut self, path: &JsonPathSegment) -> &mut JsonSchema {
         match self {
-            JsonSchema::Object(ref mut obj) => {
-                // TODO unwrap()?
-                obj.entry(path.as_key().unwrap().to_owned()).or_default()
+            JsonSchema::Object {
+                ref mut inner,
+                ref mut key_count,
+                ref mut total_count,
+            } => {
+                let key = path
+                    .as_key()
+                    .expect("path segment must be an object type")
+                    .to_owned();
+                // *key_count.entry(key.clone()).or_default() += 1;
+                // TODO keep unwrap()?
+                inner.entry(key).or_default()
             }
-            JsonSchema::Array(ref mut arr) => {
+            JsonSchema::Array { ref mut inner, .. } => {
                 // TODO unwrap()?
-                let index = path.as_index().unwrap();
-                if index >= arr.len() {
-                    arr.push(Default::default());
+                let index = path.as_index().expect("path segment must be array type");
+                if index >= inner.len() {
+                    inner.push(Default::default());
                 }
-                &mut arr[index]
+                &mut inner[index]
             }
             JsonSchema::Either(ref mut inner) => {
-                let path_type = if path.is_array() {
+                let path_type = if path.is_index() {
                     JsonType::Array
                 } else {
                     JsonType::Object
@@ -83,10 +107,22 @@ impl JsonSchema {
         }
     }
 
+    pub fn descend_path<'a, I: Iterator<Item = &'a JsonPathSegment<'a>>>(
+        &mut self,
+        path: I,
+    ) -> &mut JsonSchema {
+        let mut schema = self;
+        for part in path {
+            debug!("descending into {:?} at {:?}", schema, part,);
+            schema = schema.descend(part);
+        }
+        schema
+    }
+
     pub fn is_same_type(&self, other: &JsonSchema) -> bool {
         match (self, other) {
-            (JsonSchema::Object(_), JsonSchema::Object(_))
-            | (JsonSchema::Array(_), JsonSchema::Array(_))
+            (JsonSchema::Object { .. }, JsonSchema::Object { .. })
+            | (JsonSchema::Array { .. }, JsonSchema::Array { .. })
             | (JsonSchema::Number, JsonSchema::Number)
             | (JsonSchema::String, JsonSchema::String)
             | (JsonSchema::Null, JsonSchema::Null)
@@ -97,10 +133,8 @@ impl JsonSchema {
 
     pub fn is_type(&self, other: JsonType) -> bool {
         match (self, other) {
-            // (JsonSchema::EmptyObject, JsonType::Object)
-            // | (JsonSchema::EmptyArray, JsonType::Array)
-            (JsonSchema::Object(_), JsonType::Object)
-            | (JsonSchema::Array(_), JsonType::Array)
+            (JsonSchema::Object { .. }, JsonType::Object)
+            | (JsonSchema::Array { .. }, JsonType::Array)
             | (JsonSchema::Number, JsonType::Number)
             | (JsonSchema::String, JsonType::String)
             | (JsonSchema::Null, JsonType::Null)
@@ -111,12 +145,8 @@ impl JsonSchema {
 
     pub fn get_type(&self) -> Option<JsonType> {
         Some(match self {
-            // TODO not sure if keep
-            JsonSchema::EmptyObject => JsonType::EmptyObject,
-            JsonSchema::EmptyArray => JsonType::EmptyArray,
-
-            JsonSchema::Object(_) => JsonType::Object,
-            JsonSchema::Array(_) => JsonType::Array,
+            JsonSchema::Object { .. } => JsonType::Object,
+            JsonSchema::Array { .. } => JsonType::Array,
             JsonSchema::Number => JsonType::Number,
             JsonSchema::String => JsonType::String,
             JsonSchema::Null => JsonType::Null,
@@ -129,12 +159,15 @@ impl JsonSchema {
 impl From<JsonType> for JsonSchema {
     fn from(type_: JsonType) -> Self {
         match type_ {
-            // TODO not sure if keep
-            JsonType::EmptyObject => JsonSchema::EmptyObject,
-            JsonType::EmptyArray => JsonSchema::EmptyArray,
-
-            JsonType::Object => JsonSchema::Object(BTreeMap::new()),
-            JsonType::Array => JsonSchema::Array(Vec::new()),
+            JsonType::Object => JsonSchema::Object {
+                inner: Default::default(),
+                key_count: Default::default(),
+                total_count: Default::default(),
+            },
+            JsonType::Array => JsonSchema::Array {
+                inner: Default::default(),
+                lengths: Default::default(),
+            },
             JsonType::Number => JsonSchema::Number,
             JsonType::String => JsonSchema::String,
             JsonType::Null => JsonSchema::Null,
@@ -165,29 +198,38 @@ impl JsonSchema {
         match self {
             JsonSchema::Empty => {
                 *self = other.into();
-                self
             }
             JsonSchema::Either(ref mut inner) => {
                 inner.entry(other).or_insert_with(|| other.into());
-                self
             }
             // TODO need to handle Object({}).either(Object({...}))
             // _ if self == &other => self,
             // _ if self.is_same_type(&other) => self,
-            _ if self.is_type(other) => self,
+            _ if self.is_type(other) => (),
             _ => {
-                let old = std::mem::replace(self, JsonSchema::Either(HashMap::new()));
-                if let JsonSchema::Either(ref mut inner) = self {
+                let old = std::mem::replace(self, JsonSchema::Empty);
+                *self = JsonSchema::Either({
+                    let mut inner = HashMap::new();
                     inner.insert(
                         old.get_type()
                             .expect("Either: old doesn't have a json type"),
                         old,
                     );
                     inner.insert(other, other.into());
-                }
-                self
+                    inner
+                });
+                // let old = std::mem::replace(self, JsonSchema::Either(HashMap::new()));
+                // if let JsonSchema::Either(ref mut inner) = self {
+                //     inner.insert(
+                //         old.get_type()
+                //             .expect("Either: old doesn't have a json type"),
+                //         old,
+                //     );
+                //     inner.insert(other, other.into());
+                // }
             }
         }
+        self
     }
 }
 
@@ -231,6 +273,10 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
 
     let mut path = Vec::new();
 
+    // TODO use these instead of descending the full path each time.
+    // let mut schema_ref = &mut schema;
+    // let mut schema_ref_stack: Vec<&mut JsonSchema> = Vec::new();
+
     let mut section = Section::new(input);
     while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
@@ -248,6 +294,8 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
 
         let token_is_start = token.is_value_start();
         let token_is_close = token.is_close();
+
+        // let schema_ref = once_cell::unsync::Lazy::new(|| schema.descend_path(path.iter()));
 
         // let is_start_of_value =
         //     token.is_value_start() && current_context != Some(ValidationContext::ObjectEntryKey);
@@ -275,15 +323,32 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
             // )
             //
             // Empty objects requires all descendents be Either(Null, self)
-            let mut schema = &mut schema;
-            for part in &path {
-                debug!("descending into {:?} at {:?}", schema, part,);
-                schema = schema.descend(part);
-            }
-            debug!("schema is {:?}", schema,);
+
+            // let schema = schema.descend_path(path.iter());
+            let schema_ref = schema.descend_path(path.iter());
+
+            // if let Some(JsonType::Object) | Some(JsonType::Array) = token.value_type() {
+            //     match schema_ref {
+            //         JsonSchema::Object {
+            //             ref mut inner,
+            //             ref mut key_count,
+            //         } => {
+            //             // key_count;
+            //         }
+            //         JsonSchema::Array {
+            //             ref mut inner,
+            //             ref mut lengths,
+            //         } => {
+            //             // *schema = JsonSchema::EmptyArray;
+            //         }
+            //         _ => (),
+            //     }
+            // }
+
+            debug!("schema is {:?}", schema_ref,);
             debug!("splitting with {:?}", token.value_type(),);
-            schema.either(token.value_type().unwrap());
-            debug!("schema is now {:?}", schema,);
+            schema_ref.either(token.value_type().unwrap());
+            debug!("schema is now {:?}", schema_ref,);
 
             debug!(
                 ">\t{:?}\t{}",
@@ -293,15 +358,45 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
                     .collect::<Vec<_>>()
                     .join(".")
             );
+            debug!("pre|path={:?},schema={:?}", path, schema_ref);
         }
-        debug!("pre|path={:?},schema={:?}", path, schema);
         // token.print(&mut stdout)?;
         // stdout.write_all(b"\n")?;
 
-        // Must be popped before doing the post-visit below
-        // if token.is_close() {
-        if token_is_close {
+        // MUST run before path.pop to have access to index
+        if let Token::ArrayClose = token {
+            let array_length = path
+                .last_mut()
+                .and_then(|x| x.as_index())
+                .expect("expected index at path segment");
+            // Must be popped before doing the post-visit below
             path.pop();
+            // schema_ref = schema.descend_path(path.iter());
+            // schema_ref = schema_ref_stack.pop().unwrap();
+            let schema_ref = schema.descend_path(path.iter());
+            match schema_ref {
+                JsonSchema::Array {
+                    ref mut inner,
+                    ref mut lengths,
+                } => {
+                    lengths.insert(array_length);
+                }
+                // Further edge case:
+                // - If a new array has length smaller than the existing array, then elements after
+                // the end must be either null.
+                // - If a new Object has keys which are not shared, then the disjoint values must
+                // be either null.
+                // TODO add required fields to objects
+                // TODO add min-length to array
+                // TODO add a post-processing step to allow converting between
+                // required/min-length to either(null, *)
+                _ => (),
+            }
+        } else if token == Token::ObjectClose {
+            // Must be popped before doing the post-visit below
+            path.pop();
+            // schema_ref = schema.descend_path(path.iter());
+            // schema_ref = schema_ref_stack.pop().unwrap();
         }
 
         let is_end_of_value = {
@@ -321,29 +416,9 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
 
         // Results in printing values, arrays, and objects only at the end.
         if is_end_of_value {
-            let mut schema = &mut schema;
-            for part in &path {
-                debug!("descending into {:?} at {:?}", schema, part,);
-                schema = schema.descend(part);
-            }
-            match schema {
-                JsonSchema::Object(ref inner) if inner.is_empty() => {
-                    *schema = JsonSchema::EmptyObject;
-                }
-                JsonSchema::Array(ref inner) if inner.is_empty() => {
-                    *schema = JsonSchema::EmptyArray;
-                }
-                // Further edge case:
-                // - If a new array has length smaller than the existing array, then elements after
-                // the end must be either null.
-                // - If a new Object has keys which are not shared, then the disjoint values must
-                // be either null.
-                // TODO add required fields to objects
-                // TODO add min-length to array
-                // TODO add a post-processing step to allow converting between
-                // required/min-length to either(null, *)
-                _ => (),
-            }
+            // Use the end of the value to do some convex region tightening for objects
+            // and arrays on their required keys and length, respectively.
+
             debug!(
                 "<\t{:?}\t{}",
                 token.value_type(),
@@ -352,12 +427,12 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
                     .collect::<Vec<_>>()
                     .join(".")
             );
+            // debug!("post|path={:?},schema={:?}", path, schema_ref);
         }
         debug!(
             "post|token={:?}, state={:?}, context={:?}",
             token, last_state, current_context
         );
-        debug!("post|path={:?},schema={:?}", path, schema);
 
         // Path changes should occur:
         // - At the start of an array, push 0
@@ -367,20 +442,66 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
         // - At an object key, change key
         // - After an object close, pop
         match validator.current_context() {
-            Some(ValidationContext::ObjectStart) => path.push(JsonPathSegment::Object("".into())),
+            Some(ValidationContext::ObjectStart) => {
+                path.push(JsonPathSegment::Key("".into()));
+                let schema_ref = schema.descend_path(path[..path.len() - 1].iter());
+                if let Some(JsonSchema::Object {
+                    inner,
+                    ref mut key_count,
+                    ref mut total_count,
+                }) = schema_ref.as_object_mut()
+                {
+                    *total_count += 1;
+                } else {
+                    panic!(
+                        "Expected object for key_count:\n\tpath={:?}\n\tsubpath={:?}\n\tsub_schema={:?}",
+                        path,
+                        &path[..path.len() - 1],
+                        schema_ref
+                    );
+                }
+            }
             Some(ValidationContext::ObjectEntryKey) => {
-                if let Token::String(key) = token {
-                    if let Some(JsonPathSegment::Object(ref mut path)) = path.last_mut() {
-                        *path = key;
+                if let Token::String(new_key) = token {
+                    // TODO this is doodoo
+                    let schema_ref = schema.descend_path(path[..path.len() - 1].iter());
+                    if let Some(JsonSchema::Object {
+                        inner,
+                        ref mut key_count,
+                        ref mut total_count,
+                    }) = schema_ref.as_object_mut()
+                    {
+                        *key_count.entry(new_key.to_owned().into()).or_default() += 1;
+                    } else {
+                        panic!(
+                            "Expected object for key_count:\n\tpath={:?}\n\tsubpath={:?}\n\tsub_schema={:?}",
+                            path,
+                            &path[..path.len() - 1],
+                            schema_ref
+                        );
+                    }
+                    if let Some(ref mut segment) = path.last_mut() {
+                        // if let Some(key) = segment.as_key_mut() {
+                        if let JsonPathSegment::Key(ref mut key) = segment {
+                            *key = new_key;
+                        }
+                        // *key_count.entry(key.clone()).or_default() += 1;
+                        // schema_ref = schema_ref.descend(segment);
                     }
                 }
             }
             // Some(ValidationContext::ObjectEnd) | Some(ValidationContext::ArrayEnd) => { }
             Some(ValidationContext::ArrayStart) => {
-                path.push(JsonPathSegment::Array(0));
+                path.push(JsonPathSegment::Index(0));
+
+                // If I descend here, it will create an empty node at 0 which
+                // will require cleanup later.
+                // TODO is there a better place to do this? Only allocated when it
+                // is used via path?
+                // schema_ref.descend(&JsonPathSegment::Index(0));
             }
             Some(ValidationContext::ArrayValue) => {
-                if let Some(JsonPathSegment::Array(ref mut n)) = path.last_mut() {
+                if let Some(JsonPathSegment::Index(ref mut n)) = path.last_mut() {
                     *n += 1;
                 }
             }

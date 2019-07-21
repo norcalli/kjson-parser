@@ -132,20 +132,20 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
         // - At an object key, change key
         // - After an object close, pop
         match validator.current_context() {
-            Some(ValidationContext::ObjectStart) => path.push(JsonPathSegment::Object("".into())),
+            Some(ValidationContext::ObjectStart) => path.push(JsonPathSegment::Key("".into())),
             Some(ValidationContext::ObjectEntryKey) => {
                 if let Token::String(key) = token {
-                    if let Some(JsonPathSegment::Object(ref mut path)) = path.last_mut() {
+                    if let Some(JsonPathSegment::Key(ref mut path)) = path.last_mut() {
                         *path = key;
                     }
                 }
             }
             // Some(ValidationContext::ObjectEnd) | Some(ValidationContext::ArrayEnd) => { }
             Some(ValidationContext::ArrayStart) => {
-                path.push(JsonPathSegment::Array(0));
+                path.push(JsonPathSegment::Index(0));
             }
             Some(ValidationContext::ArrayValue) => {
-                if let Some(JsonPathSegment::Array(ref mut n)) = path.last_mut() {
+                if let Some(JsonPathSegment::Index(ref mut n)) = path.last_mut() {
                     *n += 1;
                 }
             }

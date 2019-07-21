@@ -6,9 +6,6 @@ pub mod validator;
 
 #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub enum JsonType {
-    EmptyArray,
-    EmptyObject,
-
     Array,
     Object,
     String,
@@ -19,49 +16,58 @@ pub enum JsonType {
 
 use std::borrow::{Borrow, Cow};
 
-// #[derive(Debug)]
-// pub enum JsonPathSegment<'a> {
-//     // Root,
-//     ArrayValue(usize),
-//     ObjectValue(Cow<'a, str>),
-// }
-
 #[derive(Debug, derive_more::Display)]
 pub enum JsonPathSegment<'a> {
     // Root,
     #[display(fmt = "{}", _0)]
-    Array(usize),
+    Index(usize),
     #[display(fmt = "{}", _0)]
-    Object(Cow<'a, str>),
+    Key(Cow<'a, str>),
 }
 
 impl<'a> JsonPathSegment<'a> {
     pub fn as_key(&self) -> Option<&str> {
         use JsonPathSegment::*;
         match self {
-            Object(ref s) => Some(s.borrow()),
-            Array(_) => None,
+            Key(ref s) => Some(s.borrow()),
+            Index(_) => None,
         }
     }
 
     pub fn as_index(&self) -> Option<usize> {
         use JsonPathSegment::*;
         match self {
-            Object(_) => None,
-            Array(index) => Some(*index),
+            Key(_) => None,
+            Index(index) => Some(*index),
         }
     }
 
-    pub fn is_array(&self) -> bool {
-        if let JsonPathSegment::Array(_) = self {
+    pub fn as_key_mut(&mut self) -> Option<&mut Cow<'a, str>> {
+        use JsonPathSegment::*;
+        match self {
+            Key(ref mut s) => Some(s),
+            Index(_) => None,
+        }
+    }
+
+    pub fn as_index_mut(&mut self) -> Option<&mut usize> {
+        use JsonPathSegment::*;
+        match self {
+            Key(_) => None,
+            Index(ref mut index) => Some(index),
+        }
+    }
+
+    pub fn is_index(&self) -> bool {
+        if let JsonPathSegment::Index(_) = self {
             true
         } else {
             false
         }
     }
 
-    pub fn is_object(&self) -> bool {
-        !self.is_array()
+    pub fn is_key(&self) -> bool {
+        !self.is_index()
     }
 }
 
