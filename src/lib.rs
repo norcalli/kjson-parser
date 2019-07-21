@@ -17,7 +17,7 @@ pub enum JsonType {
     Null,
 }
 
-#[derive(Clone, Debug, derive_more::Display, derive_more::From)]
+#[derive(Hash, Eq, PartialEq, Clone, Debug, derive_more::Display, derive_more::From)]
 pub enum JsonPathSegment<'a> {
     // Root,
     #[display(fmt = "{}", _0)]
@@ -77,9 +77,25 @@ pub const EMPTY_KEY: JsonPathSegment<'static> = JsonPathSegment::Key(Cow::Borrow
 // pub const EMPTY_INDEX: JsonPathSegment<'static> = JsonPathSegment::Index(std::usize::MAX);
 
 #[derive(
-    derive_more::From, derive_more::Constructor, derive_deref::Deref, derive_deref::DerefMut,
+    Hash,
+    Clone,
+    Eq,
+    PartialEq,
+    derive_more::From,
+    derive_more::Constructor,
+    derive_deref::Deref,
+    derive_deref::DerefMut,
 )]
 pub struct JsonPath<'a>(Cow<'a, [JsonPathSegment<'a>]>);
+
+impl<'a> JsonPath<'a> {
+    // TODO optimize
+    pub fn parent(&self) -> Self {
+        let mut slice = self.0.clone().into_owned();
+        slice.pop();
+        JsonPath::new(slice.into())
+    }
+}
 
 impl<'a> fmt::Display for JsonPath<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
