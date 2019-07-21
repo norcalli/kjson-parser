@@ -10,6 +10,7 @@ use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
 use parser::{JsonPathSegment, JsonType};
 
+use log::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, stdin, stdout, Read, Write};
 
@@ -33,6 +34,9 @@ trait Lens {}
 // #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[derive(Debug, Eq, PartialEq)]
 pub enum JsonSchema {
+    EmptyObject,
+    EmptyArray,
+
     Object(BTreeMap<String, JsonSchema>),
     Array(Vec<JsonSchema>),
     Number,
@@ -93,6 +97,8 @@ impl JsonSchema {
 
     pub fn is_type(&self, other: JsonType) -> bool {
         match (self, other) {
+            // (JsonSchema::EmptyObject, JsonType::Object)
+            // | (JsonSchema::EmptyArray, JsonType::Array)
             (JsonSchema::Object(_), JsonType::Object)
             | (JsonSchema::Array(_), JsonType::Array)
             | (JsonSchema::Number, JsonType::Number)
@@ -105,6 +111,10 @@ impl JsonSchema {
 
     pub fn get_type(&self) -> Option<JsonType> {
         Some(match self {
+            // TODO not sure if keep
+            JsonSchema::EmptyObject => JsonType::EmptyObject,
+            JsonSchema::EmptyArray => JsonType::EmptyArray,
+
             JsonSchema::Object(_) => JsonType::Object,
             JsonSchema::Array(_) => JsonType::Array,
             JsonSchema::Number => JsonType::Number,
@@ -119,6 +129,10 @@ impl JsonSchema {
 impl From<JsonType> for JsonSchema {
     fn from(type_: JsonType) -> Self {
         match type_ {
+            // TODO not sure if keep
+            JsonType::EmptyObject => JsonSchema::EmptyObject,
+            JsonType::EmptyArray => JsonSchema::EmptyArray,
+
             JsonType::Object => JsonSchema::Object(BTreeMap::new()),
             JsonType::Array => JsonSchema::Array(Vec::new()),
             JsonType::Number => JsonSchema::Number,
@@ -164,7 +178,11 @@ impl JsonSchema {
             _ => {
                 let old = std::mem::replace(self, JsonSchema::Either(HashMap::new()));
                 if let JsonSchema::Either(ref mut inner) = self {
-                    inner.insert(old.get_type().unwrap(), old);
+                    inner.insert(
+                        old.get_type()
+                            .expect("Either: old doesn't have a json type"),
+                        old,
+                    );
                     inner.insert(other, other.into());
                 }
                 self
@@ -205,12 +223,7 @@ impl JsonSchema {
 ///     like which one leads to a more specific schema. (specificity is a heuristic that I
 ///     think I could make)
 ///
-fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
-    let mut stdout = stdout();
-    // let mut stdout = stdout.lock();
-    // let mut stdout = io::BufWriter::new(stdout);
-    let stderr = io::stderr();
-    let mut stderr = stderr.lock();
+fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
     let mut validator = Validator::new();
     let mut last_state = ValidationState::Incomplete;
 
@@ -223,13 +236,12 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
         if token.is_whitespace() {
             continue;
         }
-        writeln!(
-            stderr,
+        debug!(
             "pre|token={:?}, state={:?}, context={:?}",
             token,
             last_state,
             validator.current_context()
-        )?;
+        );
 
         last_state = validator.process_token(&token)?;
         let current_context = validator.current_context();
@@ -244,24 +256,45 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
 
         // Results in printing values, arrays, and objects at the start.
         if is_start_of_value {
+            // Edge case:
+            // echo '[{}, 1][1,2][{"a":1}]'  | cargo run --release --example derive-schema
+            // Schema: Array(
+            //     [
+            //         Either(
+            //             {
+            //                 Number: Number,
+            //                 Object: Object(
+            //                     {
+            //                         "\"a\"": Number,
+            //                     },
+            //                 ),
+            //             },
+            //         ),
+            //         Number,
+            //     ],
+            // )
+            //
+            // Empty objects requires all descendents be Either(Null, self)
             let mut schema = &mut schema;
             for part in &path {
-                writeln!(stderr, "descending into {:?} at {:?}", schema, part,)?;
+                debug!("descending into {:?} at {:?}", schema, part,);
                 schema = schema.descend(part);
             }
+            debug!("schema is {:?}", schema,);
+            debug!("splitting with {:?}", token.value_type(),);
             schema.either(token.value_type().unwrap());
-            writeln!(stderr, "schema is now {:?}", schema,)?;
+            debug!("schema is now {:?}", schema,);
 
-            writeln!(
-                stdout,
+            debug!(
                 ">\t{:?}\t{}",
                 token.value_type(),
                 path.iter()
                     .map(|x: &JsonPathSegment| x.to_string())
                     .collect::<Vec<_>>()
                     .join(".")
-            )?;
+            );
         }
+        debug!("pre|path={:?},schema={:?}", path, schema);
         // token.print(&mut stdout)?;
         // stdout.write_all(b"\n")?;
 
@@ -288,21 +321,43 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
 
         // Results in printing values, arrays, and objects only at the end.
         if is_end_of_value {
-            writeln!(
-                stdout,
+            let mut schema = &mut schema;
+            for part in &path {
+                debug!("descending into {:?} at {:?}", schema, part,);
+                schema = schema.descend(part);
+            }
+            match schema {
+                JsonSchema::Object(ref inner) if inner.is_empty() => {
+                    *schema = JsonSchema::EmptyObject;
+                }
+                JsonSchema::Array(ref inner) if inner.is_empty() => {
+                    *schema = JsonSchema::EmptyArray;
+                }
+                // Further edge case:
+                // - If a new array has length smaller than the existing array, then elements after
+                // the end must be either null.
+                // - If a new Object has keys which are not shared, then the disjoint values must
+                // be either null.
+                // TODO add required fields to objects
+                // TODO add min-length to array
+                // TODO add a post-processing step to allow converting between
+                // required/min-length to either(null, *)
+                _ => (),
+            }
+            debug!(
                 "<\t{:?}\t{}",
                 token.value_type(),
                 path.iter()
                     .map(|x: &JsonPathSegment| x.to_string())
                     .collect::<Vec<_>>()
                     .join(".")
-            )?;
+            );
         }
-        writeln!(
-            stderr,
+        debug!(
             "post|token={:?}, state={:?}, context={:?}",
             token, last_state, current_context
-        )?;
+        );
+        debug!("post|path={:?},schema={:?}", path, schema);
 
         // Path changes should occur:
         // - At the start of an array, push 0
@@ -333,13 +388,15 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
         }
     }
     validator.finish()?;
-    writeln!(stdout, "Schema: {:#?}", schema)?;
-    Ok(())
+    Ok(schema)
 }
 
 fn main() -> Result<(), Error> {
+    env_logger::init();
     let mut stdin = stdin();
     let mut buffer = String::new();
     stdin.read_to_string(&mut buffer)?;
-    eager_reformat_entrypoint(&buffer)
+    let schema = eager_reformat_entrypoint(&buffer)?;
+    println!("Schema: {:#?}", schema);
+    Ok(())
 }

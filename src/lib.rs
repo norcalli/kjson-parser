@@ -6,6 +6,9 @@ pub mod validator;
 
 #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub enum JsonType {
+    EmptyArray,
+    EmptyObject,
+
     Array,
     Object,
     String,
