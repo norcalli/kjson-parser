@@ -6,7 +6,7 @@
 #![warn(const_err)]
 
 use parser::section::Section;
-use parser::tokenizer::{compress_next_token, utils::is_whitespace};
+use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationError, ValidationState, Validator};
 
 use std::io::{self, stdin, stdout, Read, Write};
@@ -37,38 +37,36 @@ struct Traverser {
     path: Vec<JsonPath>,
 }
 
-impl Traverser {
-}
+impl Traverser {}
 
-fn validator_entrypoint(input: &str) -> Result<(), Error> {
-    let mut validator = Validator::new();
-
-    let mut section = Section::new(input);
-    let mut last_state = ValidationState::Incomplete;
-    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
-        if token.is_whitespace() {
-            continue;
-        }
-        last_state = validator.process_token(&token).unwrap();
-    }
-    assert_eq!(last_state, ValidationState::Complete);
-    Ok(())
-}
-
-fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
+fn eager_reformat_entrypoint<'a>(input: &'a str) -> Result<(), Error> {
     let stdout = stdout();
-    let mut stdout = stdout.lock();
+    let stdout = stdout.lock();
     let mut stdout = io::BufWriter::new(stdout);
     let mut validator = Validator::new();
 
+    let mut tokens: Vec<Token<'a>> = Vec::new();
+
     let mut section = Section::new(input);
     while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }
-        token.print(&mut stdout)?;
-        if ValidationState::Complete == validator.process_token(&token)? {
-            write!(stdout, "{}", '\n')?;
+        match validator.process_token(&token) {
+            Ok(ValidationState::Complete) => {
+                tokens.push(token);
+                for token in tokens.drain(..) {
+                    token.print(&mut stdout)?;
+                }
+                stdout.write_all(b"\n")?;
+            }
+            Ok(ValidationState::Incomplete) => {
+                tokens.push(token);
+            }
+            Ok(ValidationState::Ignored) => {}
+            Err(_) => {
+                tokens.clear();
+            }
         }
     }
     Ok(())
@@ -80,3 +78,4 @@ fn main() -> Result<(), Error> {
     stdin.read_to_string(&mut buffer)?;
     eager_reformat_entrypoint(&buffer)
 }
+

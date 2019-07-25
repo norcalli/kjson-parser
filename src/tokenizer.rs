@@ -13,9 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::section::Section;
+use crate::section::{ISection, Section};
 
-use std::borrow::Cow;
+use std::borrow::{Cow, ToOwned};
 use std::io;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,7 +28,9 @@ pub enum TokenizeError {
     InvalidStringCharacter(char),
 }
 
-#[derive(Debug, PartialEq)]
+pub type TokenizeResult<T> = std::result::Result<T, TokenizeError>;
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token<'a> {
     /// Compress up to 255 sequential spaces to 1 byte.
     Spaces(u8),
@@ -127,6 +129,40 @@ impl Token<'_> {
     }
 
     #[inline]
+    /// Returns true if this can be matched completely, but that
+    /// match could be a false positive. Meaning that if you actually
+    /// had more data incoming, you should restart the token matching
+    /// from the beginning of the last token.
+    pub fn partial_false_positive(&self) -> bool {
+        match self {
+            Token::Number(_) => true,
+            _ => false,
+        }
+    }
+
+    // #[inline]
+    // pub fn byte_count(&self) -> usize {
+    //     match self {
+    //         Token::Number(ref c) | Token::String(ref c) => c.len(),
+    //         Token::Spaces(ref c) => c.len(),
+    //         _ => false,
+    //     }
+    // }
+
+    #[inline]
+    pub fn char_count(&self) -> usize {
+        use Token::*;
+
+        match self {
+            String(ref s) | Number(ref s) => s.len(),
+            Spaces(ref n) => *n as usize,
+            Null | True => 4,
+            False => 5,
+            ObjectOpen | ObjectClose | Comma | Colon | ArrayOpen | ArrayClose | Whitespace(_) => 1,
+        }
+    }
+
+    #[inline]
     pub fn print<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         match self {
             Token::String(x) | Token::Number(x) => write!(writer, "{}", x),
@@ -172,6 +208,16 @@ pub mod utils {
             s.next();
         }
         s.offset() - start
+    }
+
+    #[inline]
+    // TODO convert to (&u8) and use lookup table.
+    pub fn is_hexdigit(c: char) -> bool {
+        if let '0'..='9' | 'A'..='F' | 'a'..='f' = c {
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
@@ -239,8 +285,7 @@ pub mod utils {
     ///   plus = %x2B                ; +
     ///   zero = %x30                ; 0
     #[inline]
-    pub fn section_number(s: &mut Section<'_>) -> Result<usize, TokenizeError> {
-        let n = s.offset();
+    pub fn section_number(s: &mut Section<'_>) -> Result<(), TokenizeError> {
         match s.peek() {
             Some('-') => {
                 s.next();
@@ -264,7 +309,7 @@ pub mod utils {
         if let Some('e') | Some('E') = s.peek() {
             section_number_exponent(s)?;
         }
-        Ok(s.offset() - n)
+        Ok(())
     }
 
     /// Consume string according to JSON RFC 7159.
@@ -285,8 +330,7 @@ pub mod utils {
     ///   quotation-mark = %x22      ; "
     ///   unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
     #[inline]
-    pub fn section_string(s: &mut Section<'_>) -> Result<usize, TokenizeError> {
-        let n = s.offset();
+    pub fn section_string(s: &mut Section<'_>) -> Result<(), TokenizeError> {
         match s.peek() {
             Some('"') => {
                 s.next();
@@ -305,14 +349,17 @@ pub mod utils {
                             }
                             'u' => {
                                 s.next();
-                                let sub = &mut Section::new(s.slice_after(4));
-                                section_hexdigits(sub);
-                                if sub.offset() != 4 {
+                                let offset = s.offset();
+                                let buf = s.after();
+                                if !(s.check_next_pattern(is_hexdigit)
+                                    && s.check_next_pattern(is_hexdigit)
+                                    && s.check_next_pattern(is_hexdigit)
+                                    && s.check_next_pattern(is_hexdigit))
+                                {
                                     return Err(TokenizeError::InvalidStringUnicodeEscape(
-                                        sub.before().to_string(),
+                                        buf[..s.offset() - offset].to_owned(),
                                     ));
                                 }
-                                s.skip(4);
                             }
                             e => return Err(TokenizeError::InvalidStringEscape(*e)),
                         },
@@ -321,7 +368,7 @@ pub mod utils {
                 }
                 '"' => {
                     s.next();
-                    return Ok(s.offset() - n);
+                    return Ok(());
                 }
                 '\x20'..='\x21' | '\x23'..='\x5B' | '\x5D'..='\u{10FFFF}' => {
                     s.next();
@@ -429,18 +476,24 @@ pub mod utils {
                 }
                 // Valid number starters
                 '-' | '0'..='9' => {
-                    let n = utils::section_number(s)?;
-                    Token::Number(s.slice_before(n).into())
+                    let offset = s.offset();
+                    let buf = s.after();
+                    utils::section_number(s)?;
+                    let n = s.offset() - offset;
+                    Token::Number(buf[..n].into())
                 }
                 '"' => {
-                    let n = utils::section_string(s)?;
-                    Token::String(s.slice_before(n).into())
+                    let offset = s.offset();
+                    let buf = s.after();
+                    utils::section_string(s)?;
+                    let n = s.offset() - offset;
+                    Token::String(buf[..n].into())
                 }
                 'n' => {
                     s.next();
                     // TODO peek then next instead?
                     // Does consuming prematurely matter?
-                    if s.next() == Some('u') && s.next() == Some('l') && s.next() == Some('l') {
+                    if s.check_next('u') && s.check_next('l') && s.check_next('l') {
                         Token::Null
                     } else {
                         return Err(utils::invalid_input_err(s.peek()));
@@ -450,7 +503,7 @@ pub mod utils {
                     s.next();
                     // TODO peek then next instead?
                     // Does consuming prematurely matter?
-                    if s.next() == Some('r') && s.next() == Some('u') && s.next() == Some('e') {
+                    if s.check_next('r') && s.check_next('u') && s.check_next('e') {
                         Token::True
                     } else {
                         return Err(utils::invalid_input_err(s.peek()));
@@ -460,10 +513,12 @@ pub mod utils {
                     s.next();
                     // TODO peek then next instead?
                     // Does consuming prematurely matter?
-                    if s.next() == Some('a')
-                        && s.next() == Some('l')
-                        && s.next() == Some('s')
-                        && s.next() == Some('e')
+                    // 2019-07-24: Turns out, yes. This means that I can't use it for certain
+                    // applications like extracting json from a stream of maybe bytes.
+                    if s.check_next('a')
+                        && s.check_next('l')
+                        && s.check_next('s')
+                        && s.check_next('e')
                     {
                         Token::False
                     } else {
@@ -493,16 +548,19 @@ pub mod utils {
         compress_next_token(s, |c| c == ' ')
     }
 
-    pub fn token_length(token: &Token<'_>) -> usize {
-        use Token::*;
-
-        match token {
-            String(s) | Number(s) => s.len(),
-            Spaces(n) => *n as usize,
-            Null => 4,
-            _ => 1,
-        }
-    }
+    // // TODO assume that last_token is from the same section as before? If it is a new
+    // // section, then the lifetimes have to be different.
+    // pub fn try_resume<'a>(s: &mut Section<'a>, last_token: Token<'a>) -> Token<'a> {
+    //     if last_token.partial_false_positive() {
+    //         match last_token {
+    //             Token::Number(c) => {
+    //                 let buffer = c.clone().into_owned();
+    //                 let mut section = s.clone();
+    //                 section.
+    //             }
+    //         }
+    //     }
+    // }
 
     #[cfg(test)]
     mod tests {
@@ -532,7 +590,7 @@ pub mod utils {
                     "SECTION: {:?}",
                     s
                 );
-                assert_eq!(remaining, s.after());
+                assert_eq!(remaining, &s.after());
             }
         }
 

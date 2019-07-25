@@ -215,6 +215,11 @@ impl Validator {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.current_context = None;
+        self.context_stack.clear();
+    }
+
     #[inline]
     pub fn process_token(&mut self, token: &Token<'_>) -> Result<ValidationState, ValidationError> {
         use Token::*;

@@ -1,9 +1,70 @@
+#![warn(clippy::all)]
+
 use std::iter::Peekable;
 use std::str::Chars;
 // use unicode_segmentation::UnicodeSegmentation;
 
 // TODO make this a trait and implement for "rope" like structure.
 // aka discontinuous strings.
+
+// TODO rename
+pub trait ISection: Clone + Sized {
+    type Item: Copy + PartialEq + Eq;
+    type Slice;
+    // type Iter: IntoIterator<Item = Self::Item>;
+
+    fn peek(&mut self) -> Option<&Self::Item>;
+
+    fn next(&mut self) -> Option<Self::Item>;
+
+    #[inline]
+    fn check_next(&mut self, target: Self::Item) -> bool {
+        if self.peek() == Some(&target) {
+            self.next();
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    // fn check_next_pattern<F: Fn(&Self::Item) -> bool>(&mut self, f: F) -> bool {
+    fn check_next_pattern<F: Fn(Self::Item) -> bool>(&mut self, f: F) -> bool {
+        match self.peek() {
+            Some(c) if f(*c) => {
+                self.next();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // #[inline]
+    // fn check_iter<I: IntoIterator<Item = Self::Item>>(&mut self, target: I) -> bool {
+    //     for c in target.into_iter() {
+    //         if !self.check_next(c) {
+    //             return false;
+    //         }
+    //     }
+    //     true
+    // }
+
+    fn skip(&mut self, n: usize) -> usize {
+        for i in 0..n {
+            if self.next().is_none() {
+                return i;
+            }
+        }
+        n
+    }
+
+    fn offset(&mut self) -> usize;
+
+    fn after(&self) -> Self::Slice;
+
+    #[cfg(test)]
+    fn before(&self) -> Self::Slice;
+}
 
 #[derive(Clone, Debug)]
 pub struct Section<'a> {
@@ -31,64 +92,130 @@ impl<'a> Section<'a> {
             chars: s.chars().peekable(),
         }
     }
+}
+
+impl<'a> ISection for Section<'a> {
+    type Item = char;
+    type Slice = &'a str;
+    // type Iter = Peekable<Chars<'a>>;
 
     #[inline]
-    pub fn peek(&mut self) -> Option<&char> {
+    fn peek(&mut self) -> Option<&char> {
         self.chars.peek()
     }
 
     #[inline]
-    pub fn next(&mut self) -> Option<char> {
+    fn next(&mut self) -> Option<char> {
         self.chars.next().map(|c| {
             self.n += c.len_utf8();
             c
         })
     }
 
-    // TODO keep?
-    #[inline]
-    pub fn skip(&mut self, n: usize) {
-        // self.n += n;
-        for _ in 0..n {
-            if self.next().is_none() {
-                break;
-            }
-        }
-        // self.chars.skip(n);
-    }
+    // #[inline]
+    // TODO optimize this.
+    // fn skip(&mut self, n: usize) -> usize;
 
     #[inline]
-    pub fn offset(&mut self) -> usize {
+    fn offset(&mut self) -> usize {
         self.n
     }
 
     #[inline]
-    pub fn after(&self) -> &'a str {
+    fn after(&self) -> &'a str {
         &self.s[self.n..]
     }
 
     #[inline]
-    pub fn before(&self) -> &'a str {
+    #[cfg(test)]
+    fn before(&self) -> &'a str {
         &self.s[0..self.n]
-    }
-
-    #[inline]
-    pub fn slice_after(&self, length: usize) -> &'a str {
-        &self.s[self.n..self.n + length]
-    }
-
-    #[inline]
-    pub fn slice_before(&self, length: usize) -> &'a str {
-        &self.s[self.n - length..self.n]
     }
 }
 
+#[cfg(test)]
 impl<'a> AsRef<str> for Section<'a> {
     #[inline]
     fn as_ref(&self) -> &str {
         self.before()
     }
 }
+
+// struct SectionOfSections<S: ISection> {
+//     n: usize,
+//     head: S,
+//     sections: Vec<S>,
+// }
+
+// impl<S: ISection> SectionOfSections<S> {
+//     fn next_section(&mut self) {
+//         if let Some(section) = self.sections.pop() {
+//             self.n += self.head.offset();
+//             self.head = section;
+//         }
+//     }
+// }
+
+// impl<S: ISection> ISection for SectionOfSections<S> {
+//     type Item = S::Item;
+//     // type Slice = S::Slice;
+//     type Slice = std::iter::Flatten<S::Slice>;
+
+//     fn new(s: Self::Slice) -> Self {
+//         Self {
+//             n: 0,
+//             head: s,
+//             sections: Vec::new()
+//         }
+//     }
+
+//     // fn new_with_offset(s: Self::Slice, n: usize) -> Self { }
+
+//     fn peek(&mut self) -> Option<&Self::Item> {
+//         self.head.peek()
+//     }
+
+//     fn next(&mut self) -> Option<Self::Item> {
+//         match self.head.next() {
+//             item @ Some(_) => item,
+//             None if self.sections.is_empty() => None,
+//             None => {
+//                 self.next_section();
+//                 // self.head.next()
+//                 self.next()
+//             }
+//         }
+//     }
+
+//     // // TODO keep this method?
+//     // // fn skip(&mut self, n: usize) -> usize;
+//     // fn skip(&mut self, mut n: usize) {
+//     //     while n > 0 {
+//     //     let offset = self.head.offset();
+//     //     self.head.skip(n);
+//     //     n -= self.head.offset() - offset;
+//     //     self.next_section();
+//     //     }
+//     // }
+
+//     fn offset(&mut self) -> usize {
+//         self.n + self.head.offset()
+//     }
+
+//     fn after(&self) -> Self::Slice {
+//         self.head.after()
+//     }
+
+//     fn before(&self) -> Self::Slice {
+//         self.head.before()
+//     }
+
+//     fn slice_after(&self, length: usize) -> Self::Slice {
+
+//     }
+
+//     fn slice_before(&self, length: usize) -> Self::Slice;
+// }
 
 // trait SectionHandler {
 //     fn find(s: &mut Section<'_>);
@@ -158,33 +285,19 @@ impl<'a> ByteSection<'a> {
     #[inline]
     pub fn after(&self) -> &'a str {
         let slice = &self.s[self.n..];
-        unsafe {
-            std::str::from_utf8_unchecked(slice)
-        }
+        unsafe { std::str::from_utf8_unchecked(slice) }
     }
 
     #[inline]
     pub fn before(&self) -> &'a str {
         let slice = &self.s[0..self.n];
-        unsafe {
-            std::str::from_utf8_unchecked(slice)
-        }
+        unsafe { std::str::from_utf8_unchecked(slice) }
     }
 
     #[inline]
     pub fn slice_after(&self, length: usize) -> &'a str {
         let slice = &self.s[self.n..self.n + length];
-        unsafe {
-            std::str::from_utf8_unchecked(slice)
-        }
-    }
-
-    #[inline]
-    pub fn slice_before(&self, length: usize) -> &'a str {
-        let slice = &self.s[self.n - length..self.n];
-        unsafe {
-            std::str::from_utf8_unchecked(slice)
-        }
+        unsafe { std::str::from_utf8_unchecked(slice) }
     }
 }
 
@@ -220,20 +333,5 @@ mod tests {
         assert_eq!(s.before(), input);
         assert_eq!(s.as_ref(), input);
         assert_eq!(s.after(), "");
-    }
-
-    #[test]
-    fn slice_test() {
-        let input = "hello world";
-        let mut s = Section::new(input);
-        assert_eq!(s.slice_after(5), "hello");
-        assert_eq!(s.slice_after(7), "hello w");
-        assert_eq!(s.slice_after(0), "");
-        assert_eq!(s.slice_before(0), "");
-        s.skip(5);
-        assert_eq!(s.slice_after(0), "");
-        assert_eq!(s.slice_before(0), "");
-        assert_eq!(s.slice_after(2), " w");
-        assert_eq!(s.slice_before(2), "lo");
     }
 }
