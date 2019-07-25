@@ -448,6 +448,8 @@ pub mod utils {
     */
     
     #[inline]
+    // TODO have an option/variant to get a next_token which also decodes the String rather than
+    // finding the edges and returning it as is.
     pub fn compress_next_token<'a, F: Fn(char) -> bool>(
         s: &mut Section<'a>,
         compressed_whitespace: F,
