@@ -6,7 +6,6 @@ edition = "2018"
 
 [dependencies]
 matches = "0.1.8"
-buffered-reader = { version = "0.9.0", features = [] }
 derive_more = "0.14.0"
 log = "0.4.7"
 derive_deref = "1.1.0"

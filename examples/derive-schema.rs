@@ -131,15 +131,17 @@ impl JsonSchema {
     }
 
     pub fn is_same_type(&self, other: &JsonSchema) -> bool {
-        match (self, other) {
-            (JsonSchema::Object { .. }, JsonSchema::Object { .. })
-            | (JsonSchema::Array { .. }, JsonSchema::Array { .. })
-            | (JsonSchema::Number, JsonSchema::Number)
-            | (JsonSchema::String, JsonSchema::String)
-            | (JsonSchema::Null, JsonSchema::Null)
-            | (JsonSchema::Bool, JsonSchema::Bool) => true,
-            _ => false,
-        }
+        use std::mem::discriminant;
+        discriminant(self) == discriminant(other)
+        // match (self, other) {
+        //     (JsonSchema::Object { .. }, JsonSchema::Object { .. })
+        //     | (JsonSchema::Array { .. }, JsonSchema::Array { .. })
+        //     | (JsonSchema::Number, JsonSchema::Number)
+        //     | (JsonSchema::String, JsonSchema::String)
+        //     | (JsonSchema::Null, JsonSchema::Null)
+        //     | (JsonSchema::Bool, JsonSchema::Bool) => true,
+        //     _ => false,
+        // }
     }
 
     pub fn is_type(&self, other: JsonType) -> bool {

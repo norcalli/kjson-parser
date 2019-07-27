@@ -13,20 +13,123 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use crate::section::{ISection, Section};
+use crate::section::{ByteSection, PeekSeek};
+use crate::JsonType;
 
 use std::borrow::{Cow, ToOwned};
 use std::io;
 
-#[derive(Debug, PartialEq, Eq)]
+// #[derive(Debug, PartialEq, Eq, derive_more::From)]
+#[derive(Debug, derive_more::From)]
 pub enum TokenizeError {
+    UnexpectedByte(u8),
+    UnexpectedByteWithContext {
+        byte: u8,
+        context: TokenContext,
+    },
     UnexpectedCharacter(char),
     UnexpectedEndOfInput,
+    UnexpectedEndOfInputWithContext {
+        context: Option<TokenContext>,
+        expected_byte: Option<u8>,
+        recovery_point: Option<usize>,
+    },
     // TODO make this &str?
-    InvalidStringUnicodeEscape(String),
-    InvalidStringEscape(char),
+    InvalidStringUnicodeEscape(Vec<u8>),
+    // InvalidStringUnicodeEscape(String),
+    // InvalidStringEscape(char),
+    InvalidStringEscape(u8),
     InvalidStringCharacter(char),
 }
+
+#[derive(Debug)]
+/// This is only relevant for multi-byte tokens, so those are the only
+/// ones here.
+pub enum TokenContext {
+    String,
+    Number,
+    True,
+    False,
+    Null,
+}
+
+impl TokenizeError {
+    pub fn is_eof(&self) -> bool {
+        use TokenizeError::*;
+        match self {
+            UnexpectedEndOfInput => true,
+            UnexpectedEndOfInputWithContext { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn with_recovery_point(self, n: usize) -> TokenizeError {
+        use TokenizeError::*;
+        match self {
+            UnexpectedEndOfInput => UnexpectedEndOfInputWithContext {
+                context: None,
+                expected_byte: None,
+                recovery_point: Some(n),
+            },
+            UnexpectedEndOfInputWithContext {
+                context,
+                expected_byte,
+                ..
+            } => UnexpectedEndOfInputWithContext {
+                context,
+                expected_byte,
+                recovery_point: Some(n),
+            },
+            other => other,
+        }
+    }
+
+    fn with_context(self, context: TokenContext) -> TokenizeError {
+        use TokenizeError::*;
+        match self {
+            UnexpectedByte(byte) => UnexpectedByteWithContext { byte, context },
+            UnexpectedEndOfInput => UnexpectedEndOfInputWithContext {
+                context: Some(context),
+                expected_byte: None,
+                recovery_point: None,
+            },
+            UnexpectedEndOfInputWithContext {
+                expected_byte,
+                recovery_point,
+                ..
+            } => UnexpectedEndOfInputWithContext {
+                context: Some(context),
+                expected_byte,
+                recovery_point,
+            },
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TokenizeErrorContext {
+    expected_byte: Option<u8>,
+    token_context: Option<TokenContext>,
+    recovery_point: Option<usize>,
+}
+
+// impl TokenizeError {
+//     pub fn rewind_count(&self) -> Option<usize> {
+//         match self {
+//     UnexpectedByte(u8) =>
+//     UnexpectedCharacter(char),
+//     UnexpectedEndOfInput,
+//     // TODO make this &str?
+//     InvalidStringUnicodeEscape(Vec<u8>),
+//     // InvalidStringUnicodeEscape(String),
+//     // InvalidStringEscape(char),
+//     InvalidStringEscape(u8),
+//     InvalidStringCharacter(char),
+//     Io(io::Error),
+//         }
+//     }
+// }
 
 pub type TokenizeResult<T> = std::result::Result<T, TokenizeError>;
 
@@ -39,8 +142,10 @@ pub enum Token<'a> {
     ObjectClose,
     Comma,
     Colon,
-    String(Cow<'a, str>),
-    Number(Cow<'a, str>),
+    // String(Cow<'a, str>),
+    // Number(Cow<'a, str>),
+    String(Cow<'a, [u8]>),
+    Number(Cow<'a, [u8]>),
     ArrayOpen,
     ArrayClose,
     // Bool(bool),
@@ -49,7 +154,11 @@ pub enum Token<'a> {
     Null,
 }
 
-use crate::JsonType;
+// enum Whitespace {
+//     Newline,
+//     Tab,
+//     Space,
+// }
 
 impl Token<'_> {
     pub fn into_owned(self) -> Token<'static> {
@@ -94,7 +203,7 @@ impl Token<'_> {
         }
     }
 
-    pub fn value_type(&self) -> Option<crate::JsonType> {
+    pub fn value_type(&self) -> Option<JsonType> {
         Some(match self {
             Token::String(_) => JsonType::String,
             Token::Number(_) => JsonType::Number,
@@ -123,7 +232,9 @@ impl Token<'_> {
     #[inline]
     pub fn as_string(&self) -> Option<&str> {
         match self {
-            Token::String(c) => Some(c),
+            // Token::String(c) => Some(c),
+            // TODO use unchecked?
+            Token::String(c) => std::str::from_utf8(c).ok(),
             _ => None,
         }
     }
@@ -165,7 +276,9 @@ impl Token<'_> {
     #[inline]
     pub fn print<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         match self {
-            Token::String(x) | Token::Number(x) => write!(writer, "{}", x),
+            // Token::String(x) | Token::Number(x) => write!(writer, "{}", x),
+            // Token::Whitespace(x) => write!(writer, "{}", x),
+            Token::String(x) | Token::Number(x) => writer.write_all(x),
             Token::Whitespace(x) => write!(writer, "{}", x),
             Token::Spaces(x) => {
                 for _ in 0..*x {
@@ -186,90 +299,156 @@ impl Token<'_> {
     }
 }
 
-// enum Whitespace {
-//     Newline,
-//     Tab,
-//     Space,
+// impl<B: BufferedReader<()>> PeekSeek for B {
+//     type Item = u8;
+//     #[inline]
+//     fn peek(&mut self) -> Option<&u8> {
+//         self.data(1).ok().and_then(|s| s.get(0))
+//     }
+//     #[inline]
+//     fn next(&mut self) -> Option<u8> {
+//         self.consume(1).get(0).copied()
+//     }
 // }
+
+trait TokenizerTape: PeekSeek<Item = u8> {
+    #[inline]
+    fn expect_next(&mut self, target: Self::Item) -> TokenizeResult<()> {
+        match self.next() {
+            Some(c) if c == target => Ok(()),
+            Some(c) => Err(TokenizeError::UnexpectedByte(c)),
+            None => Err(TokenizeError::UnexpectedEndOfInput),
+        }
+    }
+
+    #[inline]
+    fn expect(&mut self) -> TokenizeResult<u8> {
+        self.next().ok_or(TokenizeError::UnexpectedEndOfInput)
+    }
+
+    #[inline]
+    fn expect_next_pattern<F: Fn(u8) -> bool>(&mut self, f: F) -> TokenizeResult<u8> {
+        match self.next() {
+            Some(c) if f(c) => Ok(c),
+            Some(c) => Err(TokenizeError::UnexpectedByte(c)),
+            None => Err(TokenizeError::UnexpectedEndOfInput),
+        }
+    }
+}
+
+impl<'a> TokenizerTape for ByteSection<'a> {}
 
 pub mod utils {
     use super::*;
 
-    // TODO double check
-    #[inline]
-    pub fn is_whitespace(c: char) -> bool {
-        c == ' ' || c == '\t' || c == '\n'
-    }
+    use crate::lookup_tables::{DIGIT_TABLE, HEXDIGIT_TABLE, STRING_TERMINALS};
 
     #[inline]
-    fn section_digits(s: &mut Section<'_>) -> usize {
-        let start = s.offset();
-        while let Some('0'..='9') = s.peek() {
-            s.next();
-        }
-        s.offset() - start
-    }
-
-    #[inline]
-    // TODO convert to (&u8) and use lookup table.
-    pub fn is_hexdigit(c: char) -> bool {
-        if let '0'..='9' | 'A'..='F' | 'a'..='f' = c {
-            true
-        } else {
-            false
-        }
-    }
-
-    #[inline]
-    fn section_hexdigits(s: &mut Section<'_>) -> usize {
-        let start = s.offset();
-        while let Some('0'..='9') | Some('A'..='F') | Some('a'..='f') = s.peek() {
-            s.next();
-        }
-        s.offset() - start
-    }
-
-    #[inline]
-    fn section_nonzero(s: &mut Section<'_>) -> usize {
-        let start = s.offset();
-        while let Some('1'..='9') = s.peek() {
-            s.next();
-        }
-        s.offset() - start
-    }
-
-    #[inline]
-    pub fn invalid_input_err(s: Option<&char>) -> TokenizeError {
+    pub fn invalid_input_err(s: Option<&u8>) -> TokenizeError {
         match s {
-            Some(c) => TokenizeError::UnexpectedCharacter(*c),
+            Some(c) => TokenizeError::UnexpectedByte(*c),
             None => TokenizeError::UnexpectedEndOfInput,
         }
     }
 
+    // #[inline]
+    // pub fn invalid_input_err_with_context(
+    //     s: Option<&u8>,
+    //     context: TokenizeErrorContext,
+    // ) -> TokenizeError {
+    //     match s {
+    //         // Some(c) => TokenizeError::UnexpectedCharacter(*c),
+    //         Some(c) => TokenizeError::UnexpectedByteWithContext(*c, context),
+    //         None => TokenizeError::UnexpectedEndOfInputWithContext(context),
+    //     }
+    // }
+
+    // TODO double check
     #[inline]
-    fn section_number_exponent(s: &mut Section<'_>) -> Result<usize, TokenizeError> {
-        let n = s.offset();
-        match s.peek() {
-            Some('e') | Some('E') => {
-                s.next();
-                match s.peek() {
-                    Some('-') | Some('+') => {
-                        s.next();
-                        if section_digits(s) == 0 {
-                            return Err(invalid_input_err(s.peek()));
-                        }
-                        Ok(s.offset() - n)
-                    }
-                    Some('0'..='9') => {
-                        s.next();
-                        section_digits(s);
-                        return Ok(s.offset() - n);
-                    }
-                    e => Err(invalid_input_err(e)),
-                }
+    pub fn is_whitespace(c: u8) -> bool {
+        c == b' ' || c == b'\t' || c == b'\n'
+    }
+
+    #[inline]
+    pub fn is_hexdigit(c: u8) -> bool {
+        HEXDIGIT_TABLE[c as usize]
+    }
+
+    #[inline]
+    pub fn is_digit(c: u8) -> bool {
+        DIGIT_TABLE[c as usize]
+    }
+
+    // #[inline]
+    // pub fn is_nonzero_digit(c: u8) -> bool {
+    //     NONZERO_DIGIT_TABLE[c as usize]
+    // }
+
+    #[inline]
+    pub fn section_digits(s: &mut ByteSection<'_>) -> TokenizeResult<usize> {
+        let n = s.n;
+        while s.check_next_pattern(is_digit) {}
+        // while let Some(c) = s.peek() {
+        //     if !DIGIT_TABLE[*c as usize] {
+        //         break;
+        //     }
+        //     s.next();
+        // }
+        Ok(s.n - n)
+    }
+
+    #[inline]
+    pub fn section_hexdigits(s: &mut ByteSection<'_>) -> TokenizeResult<usize> {
+        let n = s.n;
+        while let Some(c) = s.peek() {
+            if !HEXDIGIT_TABLE[*c as usize] {
+                break;
             }
-            e => Err(invalid_input_err(e)),
+            s.next();
         }
+        Ok(s.n - n)
+    }
+
+    #[inline]
+    pub fn section_number_frac(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        // println!("frac {}", s);
+        if s.check_next(b'.') {
+            s.expect_next_pattern(is_digit)?;
+            section_digits(s)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn section_number_exp(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        // println!("exp {}", s);
+        // TODO add even more fine grained context, such as InExponent, in Fraction, etc?
+        // if s.check_next_pattern(|c| (c | 0x20) == b'e' || c == b'E') {
+        if s.check_next_pattern(|c| (c | 0x20) == b'e') {
+            // TODO should I add is_digit in here as well?
+            // println!("{}", s);
+            s.check_next_pattern(|c| c == b'-' || c == b'+');
+            // println!("{}", s);
+            s.expect_next_pattern(is_digit)?;
+            // println!("{}", s);
+            section_digits(s)?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn section_positive_number(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        // println!("pos {}", s);
+        if s.check_next(b'0') {
+            section_number_frac(s)?;
+            section_number_exp(s)?;
+            return Ok(());
+        }
+        s.expect_next_pattern(is_digit)?;
+        section_digits(s)?;
+        section_number_frac(s)?;
+        section_number_exp(s)?;
+        Ok(())
     }
 
     /// Consume number according to JSON RFC 7159.
@@ -285,31 +464,73 @@ pub mod utils {
     ///   plus = %x2B                ; +
     ///   zero = %x30                ; 0
     #[inline]
-    pub fn section_number(s: &mut Section<'_>) -> Result<(), TokenizeError> {
-        match s.peek() {
-            Some('-') => {
-                s.next();
-                return section_number(s);
-            }
-            // if it begins with 0, it must be fractional
-            Some('0') => {
-                s.next();
-            }
-            Some('1'..='9') => {
-                section_digits(s);
-            }
-            e => return Err(invalid_input_err(e)),
+    pub fn section_number(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        // println!("num {}", s);
+        s.check_next(b'-');
+        section_positive_number(s)
+    }
+
+    // const STRING_TERMINALS: &[u8] = &[
+    //     b'"', b'\\', 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C,
+    //     0x8D, 0x8E, 0x8F, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B,
+    //     0x9C, 0x9D, 0x9E, 0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA,
+    //     0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9,
+    //     0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
+    //     0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7,
+    //     0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6,
+    //     0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5,
+    //     0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+    // ];
+    // const STRING_TERMINALS: &[u8] = &[b'"', b'\\'];
+
+    /// Sorted. ['"', '/', '\\', 'b', 'f', 'n', 'r', 't']
+    const ESCAPE_CHARACTERS: &[u8] = &[34, 47, 92, 98, 102, 110, 114, 116];
+
+    fn section_unicode_escape(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        let buf = s.take(4);
+        if buf.len() < 4 {
+            return Err(TokenizeError::InvalidStringUnicodeEscape(buf.to_vec()));
         }
-        if let Some('.') = s.peek() {
-            s.next();
-            if section_digits(s) == 0 {
-                return Err(invalid_input_err(s.peek()));
-            }
-        }
-        if let Some('e') | Some('E') = s.peek() {
-            section_number_exponent(s)?;
+        if !(is_hexdigit(buf[0])
+            && is_hexdigit(buf[1])
+            && is_hexdigit(buf[2])
+            && is_hexdigit(buf[3]))
+        {
+            return Err(TokenizeError::InvalidStringUnicodeEscape(buf.to_vec()));
         }
         Ok(())
+    }
+
+    pub fn section_inside_string(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        loop {
+            s.skip_until(|c| STRING_TERMINALS[*c as usize]);
+            let recovery_point = s.n;
+            let error_handler = move |e: TokenizeError| {
+                e.with_context(TokenContext::String)
+                    .with_recovery_point(recovery_point)
+            };
+
+            let c = s.expect().map_err(error_handler)?;
+            if c == b'\\' {
+                let c = s.expect().map_err(error_handler)?;
+                if c == b'u' {
+                    section_unicode_escape(s).map_err(error_handler)?;
+                } else {
+                    ESCAPE_CHARACTERS
+                        .binary_search(&c)
+                        .map_err(|_| error_handler(TokenizeError::UnexpectedByte(c)))?;
+                }
+            } else if c == b'"' {
+                return Ok(());
+            } else {
+                // TODO improve this
+                s.n -= 1;
+                // c @ 0x80..=0xFF => {
+                // crate::utf8_reference::next_code_point(s).ok_or_else(|| ;
+                // TODO fix this.
+                crate::utf8_reference::next_code_point(s).unwrap();
+            }
+        }
     }
 
     /// Consume string according to JSON RFC 7159.
@@ -329,61 +550,45 @@ pub mod utils {
     ///   escape = %x5C              ; \
     ///   quotation-mark = %x22      ; "
     ///   unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
-    #[inline]
-    pub fn section_string(s: &mut Section<'_>) -> Result<(), TokenizeError> {
-        match s.peek() {
-            Some('"') => {
-                s.next();
-            }
-            e => return Err(invalid_input_err(e)),
+    pub fn section_string(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        if !s.check_next(b'"') {
+            return Err(invalid_input_err(s.peek())
+                .with_context(TokenContext::String)
+                .with_recovery_point(s.n));
         }
-        while let Some(c) = s.peek() {
-            match c {
-                // Escape sequences
-                '\\' => {
-                    s.next();
-                    match s.peek() {
-                        Some(c) => match c {
-                            'n' | 't' | 'b' | 'f' | 'r' | '"' | '\\' | '/' => {
-                                s.next();
-                            }
-                            'u' => {
-                                s.next();
-                                let offset = s.offset();
-                                let buf = s.after();
-                                if !(s.check_next_pattern(is_hexdigit)
-                                    && s.check_next_pattern(is_hexdigit)
-                                    && s.check_next_pattern(is_hexdigit)
-                                    && s.check_next_pattern(is_hexdigit))
-                                {
-                                    return Err(TokenizeError::InvalidStringUnicodeEscape(
-                                        buf[..s.offset() - offset].to_owned(),
-                                    ));
-                                }
-                            }
-                            e => return Err(TokenizeError::InvalidStringEscape(*e)),
-                        },
-                        e => return Err(invalid_input_err(e)),
-                    };
+
+        loop {
+            s.skip_until(|c| STRING_TERMINALS[*c as usize]);
+            let recovery_point = s.n;
+            let error_handler = move |e: TokenizeError| {
+                e.with_context(TokenContext::String)
+                    .with_recovery_point(recovery_point)
+            };
+
+            let c = s.expect().map_err(error_handler)?;
+            if c == b'\\' {
+                let c = s.expect().map_err(error_handler)?;
+                if c == b'u' {
+                    section_unicode_escape(s).map_err(error_handler)?;
+                } else {
+                    ESCAPE_CHARACTERS
+                        .binary_search(&c)
+                        .map_err(|_| error_handler(TokenizeError::UnexpectedByte(c)))?;
                 }
-                '"' => {
-                    s.next();
-                    return Ok(());
-                }
-                '\x20'..='\x21' | '\x23'..='\x5B' | '\x5D'..='\u{10FFFF}' => {
-                    s.next();
-                }
-                e => return Err(TokenizeError::InvalidStringCharacter(*e)),
+            } else if c == b'"' {
+                return Ok(());
+            } else {
+                // TODO improve this
+                s.n -= 1;
+                // c @ 0x80..=0xFF => {
+                // crate::utf8_reference::next_code_point(s).ok_or_else(|| ;
+                // TODO fix this.
+                crate::utf8_reference::next_code_point(s).unwrap();
             }
         }
-        Err(invalid_input_err(None))
     }
 
-    pub fn peek_next_token<'a>(s: &mut Section<'a>) -> Result<Option<Token<'a>>, TokenizeError> {
-        next_token(&mut s.clone())
-    }
-
-    /* TODO benchmark against this/check the ASM output
+    /* TODO benchmark against this/check the ASM output on the whitespace handling...?
     pub fn next_token<'a>(s: &mut Section<'a>) -> Result<Option<Token<'a>>, TokenizeError> {
         Ok(Some(match s.peek() {
             Some(&c) => match c {
@@ -446,109 +651,137 @@ pub mod utils {
         }))
     }
     */
-    
-    #[inline]
     // TODO have an option/variant to get a next_token which also decodes the String rather than
     // finding the edges and returning it as is.
-    pub fn compress_next_token<'a, F: Fn(char) -> bool>(
-        s: &mut Section<'a>,
+
+    
+    pub fn compress_next_token<'a, F: Fn(u8) -> bool>(
+        s: &mut ByteSection<'a>,
         compressed_whitespace: F,
-    ) -> Result<Option<Token<'a>>, TokenizeError> {
-        Ok(Some(match s.peek() {
-            Some(&c) => match c {
-                // ' ' | '\n' | '\t' if compressed_whitespace(c) => {
-                c if compressed_whitespace(c) => {
-                    let mut n = 1;
-                    s.next();
-                    while let Some(c) = s.peek() {
-                        if !is_whitespace(*c) {
-                            break;
-                        }
-                        s.next();
-                        n += 1;
-                        if n == 255 {
-                            break;
-                        }
+    ) -> TokenizeResult<Token<'a>> {
+        Ok(match s.expect()? {
+            c if compressed_whitespace(c) => {
+                let mut n = 1;
+                while let Some(c) = s.peek() {
+                    if !is_whitespace(*c) {
+                        break;
                     }
-                    Token::Spaces(n)
-                }
-                ' ' | '\n' | '\t' => {
                     s.next();
-                    Token::Whitespace(c)
-                }
-                // Valid number starters
-                '-' | '0'..='9' => {
-                    let offset = s.offset();
-                    let buf = s.after();
-                    utils::section_number(s)?;
-                    let n = s.offset() - offset;
-                    Token::Number(buf[..n].into())
-                }
-                '"' => {
-                    let offset = s.offset();
-                    let buf = s.after();
-                    utils::section_string(s)?;
-                    let n = s.offset() - offset;
-                    Token::String(buf[..n].into())
-                }
-                'n' => {
-                    s.next();
-                    // TODO peek then next instead?
-                    // Does consuming prematurely matter?
-                    if s.check_next('u') && s.check_next('l') && s.check_next('l') {
-                        Token::Null
-                    } else {
-                        return Err(utils::invalid_input_err(s.peek()));
+                    n += 1;
+                    if n == 255 {
+                        break;
                     }
                 }
-                't' => {
-                    s.next();
-                    // TODO peek then next instead?
-                    // Does consuming prematurely matter?
-                    if s.check_next('r') && s.check_next('u') && s.check_next('e') {
-                        Token::True
-                    } else {
-                        return Err(utils::invalid_input_err(s.peek()));
-                    }
-                }
-                'f' => {
-                    s.next();
-                    // TODO peek then next instead?
-                    // Does consuming prematurely matter?
-                    // 2019-07-24: Turns out, yes. This means that I can't use it for certain
-                    // applications like extracting json from a stream of maybe bytes.
-                    if s.check_next('a')
-                        && s.check_next('l')
-                        && s.check_next('s')
-                        && s.check_next('e')
-                    {
-                        Token::False
-                    } else {
-                        return Err(utils::invalid_input_err(s.peek()));
-                    }
-                }
-                e => {
-                    let token = match e {
-                        '[' => Token::ArrayOpen,
-                        ']' => Token::ArrayClose,
-                        '{' => Token::ObjectOpen,
-                        '}' => Token::ObjectClose,
-                        ':' => Token::Colon,
-                        ',' => Token::Comma,
-                        e => return Err(utils::invalid_input_err(Some(&e))),
-                    };
-                    s.next();
-                    token
-                }
-            },
-            None => return Ok(None),
-        }))
+                Token::Spaces(n)
+            }
+            c @ b' ' | c @ b'\n' | c @ b'\t' => Token::Whitespace(c as char),
+            // Valid number starters
+            b'-' | b'0'..=b'9' => {
+                s.n -= 1;
+                let n = s.n;
+                // println!("{}", s);
+
+                // section_number(s)
+                //     .map_err(|e| e.with_context(TokenContext::Number).with_recovery_point(n))?;
+
+                section_number(s)?;
+                // .map_err(|e| e.with_context(TokenContext::Number).with_recovery_point(n))?;
+
+                Token::Number(s.src[n..s.n].into())
+            }
+            b'"' => {
+                s.n -= 1;
+                let n = s.n;
+                // section_string(s)
+                //     .map_err(|e| e.with_context(TokenContext::String).with_recovery_point(n))?;
+                section_string(s)?;
+                // .map_err(|e| e.with_context(TokenContext::String).with_recovery_point(n))?;
+                Token::String(s.src[n..s.n].into())
+            }
+            b'n' => {
+                let recovery_point = s.n;
+                let error_handler = move |e: TokenizeError| {
+                    e.with_context(TokenContext::Null)
+                        .with_recovery_point(recovery_point)
+                };
+
+                s.expect_next(b'u').map_err(error_handler)?;
+                s.expect_next(b'l').map_err(error_handler)?;
+                s.expect_next(b'l').map_err(error_handler)?;
+                Token::Null
+
+                // // TODO peek then next instead?
+                // // Does consuming prematurely matter?
+                // if s.check_next(b'u') && s.check_next(b'l') && s.check_next(b'l') {
+                //     Token::Null
+                // } else {
+                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Null));
+                // }
+            }
+            b't' => {
+                let recovery_point = s.n;
+                let error_handler = move |e: TokenizeError| {
+                    e.with_context(TokenContext::True)
+                        .with_recovery_point(recovery_point)
+                };
+                s.expect_next(b'r').map_err(error_handler)?;
+                s.expect_next(b'u').map_err(error_handler)?;
+                s.expect_next(b'e').map_err(error_handler)?;
+                Token::True
+
+                // // TODO peek then next instead?
+                // // Does consuming prematurely matter?
+                // if s.check_next(b'r') && s.check_next(b'u') && s.check_next(b'e') {
+                //     Token::True
+                // } else {
+                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Bool));
+                // }
+            }
+            b'f' => {
+                let recovery_point = s.n;
+                let error_handler = move |e: TokenizeError| {
+                    e.with_context(TokenContext::False)
+                        .with_recovery_point(recovery_point)
+                };
+                s.expect_next(b'a').map_err(error_handler)?;
+                s.expect_next(b'l').map_err(error_handler)?;
+                s.expect_next(b's').map_err(error_handler)?;
+                s.expect_next(b'e').map_err(error_handler)?;
+                Token::False
+
+                // // TODO peek then next instead?
+                // // Does consuming prematurely matter?
+                // // 2019-07-24: Turns out, yes. This means that I can't use it for certain
+                // // applications like extracting json from a stream of maybe bytes.
+                // if s.check_next(b'a')
+                //     && s.check_next(b'l')
+                //     && s.check_next(b's')
+                //     && s.check_next(b'e')
+                // {
+                //     Token::False
+                // } else {
+                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Bool));
+                // }
+            }
+            b'[' => Token::ArrayOpen,
+            b']' => Token::ArrayClose,
+            b'{' => Token::ObjectOpen,
+            b'}' => Token::ObjectClose,
+            b':' => Token::Colon,
+            b',' => Token::Comma,
+            e => return Err(TokenizeError::UnexpectedByte(e)),
+        })
     }
 
     #[inline]
-    pub fn next_token<'a>(s: &mut Section<'a>) -> Result<Option<Token<'a>>, TokenizeError> {
-        compress_next_token(s, |c| c == ' ')
+    pub fn next_token<'a>(s: &mut ByteSection<'a>) -> TokenizeResult<Token<'a>> {
+        compress_next_token(s, |c| c == b' ')
     }
+
+    // TODO I should probably use this
+    // pub fn peek_next_token<'a>(s: &mut Section<'a>) -> Result<Option<Token<'a>>, TokenizeError> {
+    //     next_token(&mut s.clone())
+    // }
 
     // // TODO assume that last_token is from the same section as before? If it is a new
     // // section, then the lifetimes have to be different.
