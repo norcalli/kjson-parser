@@ -366,15 +366,13 @@ pub mod utils {
 
     /// https://kevinlynagh.com/notes/match-vs-lookup/
     use crate::lookup_tables::{
-        DIGIT_TABLE,
-        HEXDIGIT_TABLE,
-        SINGLE_ESCAPE_CHARACTERS,
-        STRING_TERMINALS,
-        // WHITESPACE_TABLE,
+        DIGIT_TABLE, HEXDIGIT_TABLE, SINGLE_ESCAPE_CHARACTERS, STRING_TERMINALS, WHITESPACE_TABLE,
     };
 
+    // NO DIGIT LUT seems faster
     const USE_DIGIT_LUT: bool = false;
     const USE_STRING_ESCAPE_BINARY_SEARCH: bool = false;
+    const USE_WHITESPACE_LUT: bool = false;
 
     #[inline]
     pub fn invalid_input_err(s: Option<&u8>) -> TokenizeError {
@@ -387,7 +385,11 @@ pub mod utils {
     // TODO double check that this is complete.
     #[inline]
     pub fn is_whitespace(c: u8) -> bool {
-        c == b' ' || c == b'\t' || c == b'\n'
+        if USE_WHITESPACE_LUT {
+            WHITESPACE_TABLE[c as usize]
+        } else {
+            c == b' ' || c == b'\t' || c == b'\n'
+        }
     }
 
     #[inline]
@@ -413,9 +415,11 @@ pub mod utils {
     pub fn section_digits(s: &mut ByteSection<'_>) -> TokenizeResult<usize> {
         let n = s.n;
         while s.check_next_pattern(is_digit) {}
+
         // TODO make sure these compile down to the same thing.
         // while let Some(c) = s.peek() {
-        //     if !DIGIT_TABLE[*c as usize] {
+        //     // if !DIGIT_TABLE[*c as usize] {
+        //     if !is_digit(*c) {
         //         break;
         //     }
         //     s.next();
@@ -652,9 +656,11 @@ pub mod utils {
         // TODO use this?
         // Should I mark the start of a token?
         // let recovery_point = s.n;
+        let start = s.n;
         Ok(match s.expect()? {
             c if compressed_whitespace(c) => {
                 let mut n = 1;
+                // TODO I could probs clean this up.
                 while let Some(c) = s.peek() {
                     if !is_whitespace(*c) {
                         break;
@@ -668,33 +674,33 @@ pub mod utils {
                 Token::Spaces(n)
             }
             c @ b' ' | c @ b'\n' | c @ b'\t' => Token::Whitespace(c as char),
-            // b'-' => {
-            //     let n = s.n - 1;
-            //     section_positive_number(s)?;
+            b'-' => {
+                section_positive_number(s)?;
+                Token::Number(s.src[start..s.n].into())
+            }
+            b'0' => {
+                let n = s.n - 1;
+                section_number_frac(s)?;
+                section_number_exp(s)?;
+                Token::Number(s.src[start..s.n].into())
+            }
+            // Valid number starters
+            b'1'..=b'9' => {
+                section_digits(s)?;
+                section_number_frac(s)?;
+                section_number_exp(s)?;
+                Token::Number(s.src[start..s.n].into())
+            }
+            // b'-' | b'0'..=b'9' => {
+            //     // TODO is there a way to avoid reprocessing that first byte?
+            //     s.n -= 1;
+            //     let n = s.n;
+            //     section_number(s)?;
             //     Token::Number(s.src[n..s.n].into())
             // }
-            // Valid number starters
-            b'-' | b'0'..=b'9' => {
-                // TODO is there a way to avoid reprocessing that first byte?
-                s.n -= 1;
-                let n = s.n;
-                // println!("{}", s);
-
-                // section_number(s)
-                //     .map_err(|e| e.with_context(TokenContext::Number).with_recovery_point(n))?;
-
-                section_number(s)?;
-                // .map_err(|e| e.with_context(TokenContext::Number).with_recovery_point(n))?;
-
-                Token::Number(s.src[n..s.n].into())
-            }
             b'"' => {
-                let n = s.n - 1;
-                // section_string(s)
-                //     .map_err(|e| e.with_context(TokenContext::String).with_recovery_point(n))?;
                 section_inside_string(s)?;
-                // .map_err(|e| e.with_context(TokenContext::String).with_recovery_point(n))?;
-                Token::String(s.src[n..s.n].into())
+                Token::String(s.src[start..s.n].into())
             }
             b'n' => {
                 let recovery_point = s.n - 1;
@@ -707,14 +713,6 @@ pub mod utils {
                 s.expect_next(b'l').map_err(error_handler)?;
                 s.expect_next(b'l').map_err(error_handler)?;
                 Token::Null
-
-                // // TODO peek then next instead?
-                // // Does consuming prematurely matter?
-                // if s.check_next(b'u') && s.check_next(b'l') && s.check_next(b'l') {
-                //     Token::Null
-                // } else {
-                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Null));
-                // }
             }
             b't' => {
                 let recovery_point = s.n - 1;
@@ -726,14 +724,6 @@ pub mod utils {
                 s.expect_next(b'u').map_err(error_handler)?;
                 s.expect_next(b'e').map_err(error_handler)?;
                 Token::True
-
-                // // TODO peek then next instead?
-                // // Does consuming prematurely matter?
-                // if s.check_next(b'r') && s.check_next(b'u') && s.check_next(b'e') {
-                //     Token::True
-                // } else {
-                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Bool));
-                // }
             }
             b'f' => {
                 let recovery_point = s.n - 1;
