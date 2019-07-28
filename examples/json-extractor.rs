@@ -3,13 +3,11 @@
 // use termion::raw::IntoRawMode;
 // use termion::{clear, cursor, color, style};
 
-#![warn(const_err)]
+#![warn(const_err, clippy::all)]
 
 // use parser::section::Section;
-use parser::section::{ISection, Section};
-use parser::tokenizer::{
-    compress_next_token, utils::is_whitespace, Token, TokenizeError, TokenizeResult,
-};
+use parser::section::ByteSection;
+use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token, TokenizeError};
 use parser::validator::{ValidationError, ValidationState, Validator};
 
 use std::io::{self, stdin, stdout, Read, Write};
@@ -20,124 +18,112 @@ use log::*;
 #[derive(Debug, From)]
 pub enum Error {
     Io(std::io::Error),
-    Validation(ValidationError),
+    TokenizerError(TokenizeError),
+    // Validation(ValidationError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Default)]
-struct Extractor<W: io::Write> {
-    tokens: Vec<Token<'static>>,
-    validator: Validator,
-    stdout: W,
-}
+const GREEDY: bool = true;
 
-impl<W: io::Write> Extractor<W> {
-    pub fn check_token(
-        &mut self,
-        token: TokenizeResult<Option<Token<'_>>>,
-        mut section: &mut Section<'_>,
-    ) -> Result<bool> {
-        match token {
-            Ok(Some(token)) => {
-                if token.is_whitespace() {
-                    return Ok(true);
-                }
-                self.check_validation(token)?;
-            }
-            Ok(None) => {
-                return Ok(false);
-            }
-            Err(TokenizeError::UnexpectedEndOfInput) => {
-                return Ok(false);
-            }
-            Err(TokenizeError::UnexpectedCharacter(c)) => {
-                debug!("unexpected char = {}", c);
-                // let mut section = section.clone();
-                // section.next();
-                self.tokens.clear();
-                self.validator.reset();
-
-                let micro_input = format!("{}", c);
-                let mut micro_section = Section::new(micro_input.as_str());
-                let micro_token = compress_next_token(&mut micro_section, is_whitespace);
-                // if token.is_ok() {
-                if let Ok(Some(ref token)) = micro_token {
-                    if token.partial_false_positive() {
-                        let token = compress_next_token(&mut section, is_whitespace);
-                        return self.check_token(token, &mut section);
-                    } else {
-                        section.next();
-                        return self.check_token(micro_token, &mut micro_section);
-                    }
-                } else {
-                    section.next();
-                    return Ok(true);
-                    // return self.check_token(token, &mut section);
-                }
-            }
-            // TODO make sure the other tokenizer error cases don't consume.
-            Err(_) => {
-                section.next();
-                self.tokens.clear();
-            }
-        }
-        Ok(true)
-    }
-
-    pub fn check_validation(&mut self, token: Token<'_>) -> Result<()> {
-        match self.validator.process_token(&token) {
-            Ok(ValidationState::Complete) => {
-                self.tokens.push(token.into_owned());
-                debug!("Flushing tokens: {:?}", self.tokens);
-                for token in self.tokens.drain(..) {
-                    token.print(&mut self.stdout)?;
-                }
-                self.stdout.write_all(b"\n")?;
-            }
-            Ok(ValidationState::Incomplete) => {
-                debug!("Adding token: {:?}", token);
-                self.tokens.push(token.into_owned());
-            }
-            Ok(ValidationState::Ignored) => {}
-            Err(_) => {
-                debug!("Clearing tokens: {:?}", self.tokens);
-                self.tokens.clear();
-            }
-        }
-        Ok(())
-    }
-}
-
-fn eager_reformat_entrypoint<'a>(input: &'a str) -> Result<()> {
+fn entrypoint<'a>(input: &'a [u8]) -> Result<()> {
     let stdout = stdout();
     let stdout = stdout.lock();
     let mut stdout = io::BufWriter::new(stdout);
 
-    let mut extractor = Extractor {
-        stdout,
-        tokens: Default::default(),
-        validator: Default::default(),
-    };
+    let mut validator = Validator::new();
+    let mut tokens: Vec<Token<'a>> = Vec::new();
 
-    let mut section = Section::new(input);
+    let mut section = ByteSection::new(input);
+
+    let mut last_start = section.n;
+
     loop {
-        debug!("peek = {:?}", section.peek());
-        let result = compress_next_token(&mut section, is_whitespace);
+        match compress_next_token(&mut section, is_whitespace) {
+            Ok(token) => {
+                match validator.process_token(&token) {
+                    // On completion, add the final token, and write the stored tokens to output
+                    Ok(ValidationState::Complete) => {
+                        tokens.push(token.into_owned());
+                        for token in tokens.drain(..) {
+                            token.print(&mut stdout)?;
+                        }
+                        stdout.write_all(b"\n")?;
+                    }
 
-        debug!("next_token = {:?}", result);
+                    Ok(ValidationState::Incomplete) => {
+                        tokens.push(token.into_owned());
+                    }
 
-        if !extractor.check_token(result, &mut section)? {
-            break;
+                    Ok(ValidationState::Ignored) => {}
+
+                    Err(err) => {
+                        // TODO make this an option that can be enabled/disabled
+                        // Go back through our token stack to print any values which could
+                        // be valid tokens on standalone, aka Number/String/Null/True/False
+
+                        validator.reset();
+                        if GREEDY {
+                            if token.is_complete_value() {
+                                token.print(&mut stdout)?;
+                                stdout.write_all(b"\n")?;
+                            }
+                            for token in tokens.drain(..) {
+                                if token.is_complete_value() {
+                                    token.print(&mut stdout)?;
+                                    stdout.write_all(b"\n")?;
+                                }
+                            }
+                        } else {
+                            tokens.clear();
+                        }
+                    }
+                }
+            }
+
+            // On an unexpected byte, we should retry parsing at this point
+            Err(TokenizeError::UnexpectedByteWithContext { .. })
+            | Err(TokenizeError::UnexpectedByte(_)) => {
+                validator.reset();
+                tokens.clear();
+
+                // The byte was consumed, so we have to rewind one.
+                section.n -= 1;
+
+                // We've already tried restarting, so don't try it again.
+                if last_start == section.n {
+                    section.n += 1;
+                }
+
+                last_start = section.n;
+            }
+
+            Err(ref err) if err.is_eof() => {
+                match validator.finish() {
+                    Ok(ValidationState::Complete) => {
+                        for token in tokens.drain(..) {
+                            token.print(&mut stdout)?;
+                        }
+                        stdout.write_all(b"\n")?;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+                break;
+            }
+
+            // The only errors remaining are InvalidString* stuff, so we can skip these and
+            // try the next token.
+            Err(err) => {}
         }
     }
     Ok(())
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    // env_logger::init();
     let mut stdin = stdin();
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
-    eager_reformat_entrypoint(&buffer)
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
+    entrypoint(&buffer)
 }

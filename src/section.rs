@@ -344,16 +344,20 @@ impl<'a> ByteSection<'a> {
     // pub fn offset_from(&self, n: usize) -> usize {
     //     self.n - n
     // }
+
+    #[inline]
     pub fn new(buf: &'a [u8]) -> ByteSection<'a> {
         ByteSection { n: 0, src: buf }
     }
 
+    #[inline]
     pub fn take(&mut self, n: usize) -> &'a [u8] {
         let result = &self.src[self.n..self.src.len().min(self.n + n)];
         self.n += result.len();
         result
     }
 
+    #[inline]
     pub fn skip_until<F: Fn(&u8) -> bool>(&mut self, f: F) -> usize {
         // let n = self.n;
         if let Some(i) = self.src.iter().skip(self.n).position(f) {
@@ -365,11 +369,8 @@ impl<'a> ByteSection<'a> {
         self.n
     }
 
-    pub fn eof(&self) -> bool {
-        self.n == self.src.len()
-    }
-
-    pub fn empty(&self) -> bool {
+    #[inline]
+    pub fn is_empty(&self) -> bool {
         self.n == self.src.len()
     }
 }
