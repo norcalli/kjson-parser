@@ -61,6 +61,11 @@ impl<'a> ByteSection<'a> {
     pub fn is_empty(&self) -> bool {
         self.n == self.src.len()
     }
+
+    pub fn reset(&mut self, src: &'a [u8]) {
+        self.src = src;
+        self.n = 0;
+    }
 }
 
 pub trait PeekSeek: Sized {
@@ -115,6 +120,12 @@ impl PeekSeek for ByteSection<'_> {
         let result = self.peek().copied();
         self.n += 1;
         result
+    }
+
+    #[inline]
+    fn skip(&mut self, n: usize) -> usize {
+        self.n = self.src.len().min(n + self.n);
+        self.n
     }
 }
 

@@ -1,7 +1,7 @@
 #![warn(clippy::all)]
 
 mod lookup_tables;
-mod utf8_reference;
+mod utf8;
 pub mod section;
 pub mod tokenizer;
 pub mod validator;

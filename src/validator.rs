@@ -131,7 +131,7 @@ impl ValidationContext {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Validator {
     // TODO benchmark version with only Vec + .last()
     current_context: Option<ValidationContext>,

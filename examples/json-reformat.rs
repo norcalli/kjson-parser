@@ -12,6 +12,16 @@ use std::io::{self, stdin, stdout, Read, Write};
 use derive_more::From;
 use koption_macros::*;
 
+const DEBUG: bool = false;
+
+macro_rules! dprintln {
+    ($($e:expr),*) => (
+        if DEBUG {
+            eprintln!($($e),*);
+        }
+    )
+}
+
 #[derive(Debug, From)]
 pub enum Error {
     Io(std::io::Error),
@@ -29,13 +39,13 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 // const BUFFER_SIZE: usize = 4 * 1024 * 1024;
-// const BUFFER_SIZE: usize = 1024;
-const BUFFER_SIZE: usize = 1000;
+const BUFFER_SIZE: usize = 1024;
+// const BUFFER_SIZE: usize = 1024 * 1024;
+// const BUFFER_SIZE: usize = 1000;
 
 pub struct Buffer {
     pub buffer: Vec<u8>,
     pub section_size: usize,
-    pub renewal_count: usize,
 }
 
 impl Buffer {
@@ -43,7 +53,6 @@ impl Buffer {
         Buffer {
             buffer: vec![0; size],
             section_size: 0,
-            renewal_count: 0,
         }
     }
 
@@ -51,87 +60,32 @@ impl Buffer {
         ByteSection::new(&self.buffer[..self.section_size])
     }
 
+    #[inline]
     pub fn init<R: Read>(&mut self, r: &mut R) -> io::Result<usize> {
         self.section_size = r.read(&mut self.buffer)?;
-        self.renewal_count += 1;
         // self.section.reset(&self.buffer[..count]);
         // std::mem::replace(&mut self.section.src, &self.buffer[..count]);
         Ok(self.section_size)
     }
 
+    #[inline]
     pub fn renew<R: Read>(&mut self, r: &mut R, recovery_point: usize) -> io::Result<usize> {
         let n = self.section_size;
         // debug_assert!(recovery_point < n);
         debug_assert!(recovery_point <= n);
-        let recovery_length = n - recovery_point;
-        self.buffer.copy_within(recovery_point..n, 0);
-        let read_count = r.read(&mut self.buffer[recovery_length..])?;
-        if read_count > 0 {
-            self.renewal_count += 1;
+        // Nothing to recover if we are at the end of the buffer.
+        if recovery_point == n {
+            self.section_size = r.read(&mut self.buffer)?;
+            Ok(self.section_size)
+        } else {
+            let recovery_length = n - recovery_point;
+            self.buffer.copy_within(recovery_point..n, 0);
+            let read_count = r.read(&mut self.buffer[recovery_length..])?;
+            self.section_size = recovery_length + read_count;
+            Ok(read_count)
         }
-        self.section_size = recovery_length + read_count;
-        Ok(read_count)
     }
 }
-
-/*
-
-// TODO make checking integers/extra input/empty input configurable errors.
-// You can make a validator more permissive or less permissive depending on your
-// preference for edge cases.
-fn eager_reformat_full_entrypoint(input: &[u8]) -> Result<()> {
-    let stdout = stdout();
-    let mut stdout = stdout.lock();
-    let mut stdout = io::BufWriter::new(stdout);
-
-    let mut validator = Validator::new();
-    let mut last_state = ValidationState::Incomplete;
-
-    let mut section = ByteSection::new(input);
-
-    let mut had_tokens = false;
-    while !section.is_empty() {
-        let token = compress_next_token(&mut section, is_whitespace)?;
-        if token.is_whitespace() {
-            continue;
-        }
-        last_state = validator.process_token(&token)?;
-        had_tokens = true;
-        match token {
-            Token::String(ref s) => {
-                let s = std::str::from_utf8(s)?;
-                json::parse(s).map_err(|_| Error::InvalidString)?;
-            }
-            Token::Number(ref s) => {
-                let s = std::str::from_utf8(s)?;
-                // TODO check overflow/underflow/etc.
-                let x: f64 = s.parse()?;
-                // Extra testing for integers.
-                if s.find(|c| c == 'e' || c == 'E' || c == '.').is_none()
-                    && x.floor() - x <= std::f64::EPSILON
-                {
-                    let _: i64 = s.parse()?;
-                }
-            }
-            _ => (),
-        }
-        token.print(&mut stdout)?;
-        if ValidationState::Complete == last_state {
-            stdout.write_all(b"\n")?;
-            break;
-        }
-    }
-    validator.finish()?;
-    while section.check_next_pattern(is_whitespace) {}
-    if section.peek().is_some() {
-        return Err(Error::ExtraInput);
-    }
-    if !had_tokens {
-        return Err(Error::EmptyInput);
-    }
-    Ok(())
-}
-*/
 
 /// Returns the point at which to continue parsing.
 fn finish_string_token<R: Read, W: Write>(
@@ -165,6 +119,7 @@ fn finish_string_token<R: Read, W: Write>(
 
 struct Configuration {}
 
+#[derive(Debug)]
 enum CompletionState {
     Complete,
     Incomplete,
@@ -207,13 +162,32 @@ fn chunked_entrypoint() -> Result<()> {
     let mut had_tokens = false;
 
     loop {
+        let mut section = buffer.section();
+        dprintln!(
+            "beginning. section.n = {}, section.head = {:?}",
+            section.n,
+            if section.n < section.src.len() {
+                std::str::from_utf8(&section.src[section.n..])
+            } else {
+                Ok("")
+            }
+        );
+        section.skip(continuation_point);
         let result = (|| -> Result<CompletionState> {
-            let mut section = buffer.section();
-            section.skip(continuation_point);
+            dprintln!(
+                "continuation = {}, section.start = {:?}",
+                continuation_point,
+                // std::str::from_utf8(&section.src[section.n..section.src.len().min(section.n + 10)])
+                std::str::from_utf8(&section.src[section.n..])
+            );
             while !section.is_empty() {
                 let token = compress_next_token(&mut section, is_whitespace)?;
                 if token.is_whitespace() {
                     continue;
+                }
+                if section.is_empty() && token.potential_false_positive() {
+                    continuation_point = section.n;
+                    return Ok(CompletionState::PotentialFalsePositive(token.into_owned()));
                 }
                 last_state = validator.process_token(&token)?;
                 had_tokens = true;
@@ -242,38 +216,65 @@ fn chunked_entrypoint() -> Result<()> {
                     continuation_point = section.n;
                     return Ok(CompletionState::Complete);
                 }
-                if section.is_empty() && token.potential_false_positive() {
-                    continuation_point = section.n;
-                    return Ok(CompletionState::PotentialFalsePositive(token.into_owned()));
-                }
             }
+            dprintln!(
+                "end. section.n = {}, section.head = {:?}",
+                section.n,
+                std::str::from_utf8(&section.src[section.n..])
+            );
             continuation_point = section.n;
             Ok(CompletionState::Incomplete)
         })();
+        continuation_point = section.n;
+        // drop(section);
+
+        dprintln!(
+            "result. section.n = {}, section.head = {:?}",
+            section.n,
+            if section.n < section.src.len() {
+                std::str::from_utf8(&section.src[section.n..])
+            } else {
+                Ok("")
+            }
+        );
+        dprintln!("result = {:?}", result);
 
         match result {
             Ok(CompletionState::Complete) => {
-                // TODO handle completion and checking for tokens after the end.
-                break;
+                validator.finish()?;
             }
 
             // We finished tokenizing and landed exactly on the edge of the buffer, but
             // validation isn't complete yet.
             Ok(CompletionState::Incomplete) => {
+                dprintln!("ok(false), renewing buffer");
                 if buffer.renew(stdin, buffer.section_size)? == 0 {
+                    dprintln!("no more bytes");
                     break;
                 }
                 continuation_point = 0;
             }
 
+            // Validation is skipped, so we need to do that, but only if we hit the same conditions
+            // as the ones that brought us here, since then we would be in an loop.
+            // Those conditions are: section.is_empty() && token.potential_false_positive()
+            // This could only be triggered twice in a row if we hit the end of the input as well,
+            // which implies buffer.renew(..) = 0.
             Ok(CompletionState::PotentialFalsePositive(token)) => match token {
                 Token::Number(ref s) => {
                     let token_start = continuation_point - s.len();
                     let recovery_point = token_start;
-                    continuation_point = token_start;
+                    continuation_point = 0;
                     if buffer.renew(stdin, recovery_point)? == 0 {
+                        // Process validation.
+                        validator.process_token(&token)?;
+                        had_tokens = true;
                         break;
                     }
+                    dprintln!(
+                        "buffer recovery: {:?}",
+                        std::str::from_utf8(&buffer.buffer[..buffer.buffer.len() - recovery_point])
+                    );
                 }
                 _ => unreachable!("Only Token::Number is potential_false_positive"),
             },
@@ -283,15 +284,24 @@ fn chunked_entrypoint() -> Result<()> {
                 match and!(err.token_start() => err.recovery_point()) {
                     // unrecoverable
                     None => {
+                        dprintln!("unrecoverable tokenizer error: {:?}", err);
                         return Err(Error::Tokenizer(err));
                     }
 
                     // recoverable.
                     Some((token_start, recovery_point)) => {
+                        dprintln!("recoverable: {} -> {}", token_start, recovery_point);
                         stdout.write_all(&buffer.buffer[token_start..recovery_point])?;
                         if buffer.renew(stdin, recovery_point)? == 0 {
+                            dprintln!("finishing string: no more bytes");
                             return Err(Error::UnexpectedEndOfInput);
                         }
+                        dprintln!(
+                            "buffer recovery: {:?}",
+                            std::str::from_utf8(
+                                &buffer.buffer[..buffer.buffer.len() - recovery_point]
+                            )
+                        );
                         if err.context() == Some(TokenContext::String) {
                             continuation_point =
                                 finish_string_token(&mut buffer, stdin, &mut stdout)?;
@@ -301,7 +311,9 @@ fn chunked_entrypoint() -> Result<()> {
                             if validator.process_token(&Token::String(vec![].into()))?
                                 == ValidationState::Complete
                             {
-                                break;
+                                stdout.write_all(b"\n")?;
+                                // TODO what to do here?
+                                // break;
                             }
                         } else {
                             continuation_point = 0;
@@ -309,6 +321,7 @@ fn chunked_entrypoint() -> Result<()> {
                     }
                 }
             }
+
             err @ Err(_) => {
                 return err.map(|_| ());
             }
@@ -328,12 +341,5 @@ fn chunked_entrypoint() -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    // let mut stdin = stdin();
-    // let mut buffer: Vec<u8> = Vec::new();
-    // stdin.read_to_end(&mut buffer)?;
-    // let result = eager_reformat_entrypoint(&buffer);
-    // info!("{:?}", result);
-    // result
-
     chunked_entrypoint()
 }

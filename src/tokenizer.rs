@@ -32,6 +32,7 @@ pub enum TokenizeError {
         context: Option<TokenContext>,
         expected_byte: Option<u8>,
         recovery_point: Option<usize>,
+        token_start: Option<usize>,
     },
     // TODO make this &str?
     InvalidStringUnicodeEscape(Vec<u8>),
@@ -44,11 +45,37 @@ pub enum TokenizeError {
 /// ones here.
 pub enum TokenContext {
     String,
+    // StringUtf8Byte,
+    // StringEscapeCharacter,
+    // StringUtf8EscapeCharacter,
     Number,
+    // NumberFraction,
+    // NumberExponent,
     True,
     False,
     Null,
 }
+
+// impl TokenContext {
+//     pub fn is_string(self) -> bool {
+//         match self {
+//             TokenContext::String
+//             | TokenContext::StringUtf8Byte
+//             | TokenContext::StringEscapeCharacter
+//             | TokenContext::StringUtf8EscapeCharacter => true,
+//             _ => false,
+//         }
+//     }
+
+//     pub fn is_number(self) -> bool {
+//         match self {
+//             TokenContext::Number
+//             | TokenContext::NumberFraction
+//             | TokenContext::NumberExponent => true,
+//             _ => false,
+//         }
+//     }
+// }
 
 impl TokenizeError {
     pub fn is_eof(&self) -> bool {
@@ -68,6 +95,14 @@ impl TokenizeError {
         }
     }
 
+    pub fn token_start(&self) -> Option<usize> {
+        use TokenizeError::*;
+        match self {
+            UnexpectedEndOfInputWithContext { token_start, .. } => *token_start,
+            _ => None,
+        }
+    }
+
     pub fn context(&self) -> Option<TokenContext> {
         use TokenizeError::*;
         match self {
@@ -77,28 +112,55 @@ impl TokenizeError {
         }
     }
 
-    fn with_recovery_point(self, n: usize) -> TokenizeError {
+    pub fn with_recovery_point(self, n: usize) -> TokenizeError {
         use TokenizeError::*;
         match self {
             UnexpectedEndOfInput => UnexpectedEndOfInputWithContext {
                 context: None,
                 expected_byte: None,
                 recovery_point: Some(n),
+                token_start: None,
             },
             UnexpectedEndOfInputWithContext {
                 context,
                 expected_byte,
+                token_start,
                 ..
             } => UnexpectedEndOfInputWithContext {
                 context,
                 expected_byte,
                 recovery_point: Some(n),
+                token_start,
             },
             other => other,
         }
     }
 
-    fn with_context(self, context: TokenContext) -> TokenizeError {
+    pub fn with_token_start(self, n: usize) -> TokenizeError {
+        use TokenizeError::*;
+        match self {
+            UnexpectedEndOfInput => UnexpectedEndOfInputWithContext {
+                context: None,
+                expected_byte: None,
+                recovery_point: None,
+                token_start: Some(n),
+            },
+            UnexpectedEndOfInputWithContext {
+                context,
+                expected_byte,
+                recovery_point,
+                ..
+            } => UnexpectedEndOfInputWithContext {
+                context,
+                expected_byte,
+                recovery_point,
+                token_start: Some(n),
+            },
+            other => other,
+        }
+    }
+
+    pub fn with_context(self, context: TokenContext) -> TokenizeError {
         use TokenizeError::*;
         match self {
             UnexpectedByte(byte) => UnexpectedByteWithContext { byte, context },
@@ -106,15 +168,18 @@ impl TokenizeError {
                 context: Some(context),
                 expected_byte: None,
                 recovery_point: None,
+                token_start: None,
             },
             UnexpectedEndOfInputWithContext {
                 expected_byte,
                 recovery_point,
+                token_start,
                 ..
             } => UnexpectedEndOfInputWithContext {
                 context: Some(context),
                 expected_byte,
                 recovery_point,
+                token_start,
             },
             other => other,
         }
@@ -267,7 +332,7 @@ impl Token<'_> {
     /// match could be a false positive. Meaning that if you actually
     /// had more data incoming, you should restart the token matching
     /// from the beginning of the last token.
-    pub fn partial_false_positive(&self) -> bool {
+    pub fn potential_false_positive(&self) -> bool {
         match self {
             Token::Number(_) => true,
             _ => false,
@@ -363,6 +428,8 @@ impl<'a> TokenizerTape for ByteSection<'a> {}
 
 pub mod utils {
     use super::*;
+
+    use crate::utf8;
 
     /// https://kevinlynagh.com/notes/match-vs-lookup/
     use crate::lookup_tables::{
@@ -510,6 +577,7 @@ pub mod utils {
 
     #[inline]
     pub fn section_inside_string(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        let start = s.n;
         loop {
             // We only care about escape characters and codepoints for special processing.
             // Otherwise, just skip ahead.
@@ -519,6 +587,8 @@ pub mod utils {
             let error_handler = move |e: TokenizeError| {
                 e.with_context(TokenContext::String)
                     .with_recovery_point(recovery_point)
+                    // TODO keep this?
+                    .with_token_start(start)
             };
 
             match s.expect().map_err(error_handler)? {
@@ -546,8 +616,21 @@ pub mod utils {
                     }
                 }
                 x => {
+                    let mut width = utf8::utf8_char_width(x) as usize;
+                    if width == 0 {
+                        return Err(TokenizeError::InvalidStringCodepoint((x as u32) << 28));
+                    }
+                    // We already have one.
+                    width -= 1;
+                    // TODO optimize this
+                    let buf = s.take(width);
+                    if buf.len() < width {
+                        return Err(TokenizeError::UnexpectedEndOfInput).map_err(error_handler);
+                    }
+                    // TODO this is inconsistent with above where I don't actually bother with
+                    // validation.
                     // TODO should this potentially error out?
-                    let codepoint = crate::utf8_reference::definitely_next_codepoint(x, s);
+                    // let codepoint = utf8::definitely_next_codepoint(x, buf);
                 }
             }
         }
@@ -572,13 +655,15 @@ pub mod utils {
     ///   unescaped = %x20-21 / %x23-5B / %x5D-10FFFF
     #[inline]
     pub fn section_string(s: &mut ByteSection<'_>) -> TokenizeResult<()> {
+        let start = s.n;
         if !s.check_next(b'"') {
             return Err(invalid_input_err(s.peek())
                 .with_context(TokenContext::String)
+                .with_token_start(start)
                 .with_recovery_point(s.n));
         }
 
-        section_inside_string(s)
+        section_inside_string(s).map_err(|e| e.with_token_start(start))
     }
 
     /* TODO benchmark against this/check the ASM output on the whitespace handling...?
@@ -657,108 +742,110 @@ pub mod utils {
         // Should I mark the start of a token?
         // let recovery_point = s.n;
         let start = s.n;
-        Ok(match s.expect()? {
-            c if compressed_whitespace(c) => {
-                let mut n = 1;
-                // TODO I could probs clean this up.
-                while let Some(c) = s.peek() {
-                    if !is_whitespace(*c) {
-                        break;
+        (|| -> TokenizeResult<Token<'a>> {
+            Ok(match s.expect()? {
+                c if compressed_whitespace(c) => {
+                    let mut n = 1;
+                    // TODO I could probs clean this up.
+                    while let Some(c) = s.peek() {
+                        if !is_whitespace(*c) {
+                            break;
+                        }
+                        s.next();
+                        n += 1;
+                        if n == 255 {
+                            break;
+                        }
                     }
-                    s.next();
-                    n += 1;
-                    if n == 255 {
-                        break;
-                    }
+                    Token::Spaces(n)
                 }
-                Token::Spaces(n)
-            }
-            c @ b' ' | c @ b'\n' | c @ b'\t' => Token::Whitespace(c as char),
-            b'-' => {
-                section_positive_number(s)?;
-                Token::Number(s.src[start..s.n].into())
-            }
-            b'0' => {
-                let n = s.n - 1;
-                section_number_frac(s)?;
-                section_number_exp(s)?;
-                Token::Number(s.src[start..s.n].into())
-            }
-            // Valid number starters
-            b'1'..=b'9' => {
-                section_digits(s)?;
-                section_number_frac(s)?;
-                section_number_exp(s)?;
-                Token::Number(s.src[start..s.n].into())
-            }
-            // b'-' | b'0'..=b'9' => {
-            //     // TODO is there a way to avoid reprocessing that first byte?
-            //     s.n -= 1;
-            //     let n = s.n;
-            //     section_number(s)?;
-            //     Token::Number(s.src[n..s.n].into())
-            // }
-            b'"' => {
-                section_inside_string(s)?;
-                Token::String(s.src[start..s.n].into())
-            }
-            b'n' => {
-                let recovery_point = s.n - 1;
-                let error_handler = move |e: TokenizeError| {
-                    e.with_context(TokenContext::Null)
-                        .with_recovery_point(recovery_point)
-                };
-
-                s.expect_next(b'u').map_err(error_handler)?;
-                s.expect_next(b'l').map_err(error_handler)?;
-                s.expect_next(b'l').map_err(error_handler)?;
-                Token::Null
-            }
-            b't' => {
-                let recovery_point = s.n - 1;
-                let error_handler = move |e: TokenizeError| {
-                    e.with_context(TokenContext::True)
-                        .with_recovery_point(recovery_point)
-                };
-                s.expect_next(b'r').map_err(error_handler)?;
-                s.expect_next(b'u').map_err(error_handler)?;
-                s.expect_next(b'e').map_err(error_handler)?;
-                Token::True
-            }
-            b'f' => {
-                let recovery_point = s.n - 1;
-                let error_handler = move |e: TokenizeError| {
-                    e.with_context(TokenContext::False)
-                        .with_recovery_point(recovery_point)
-                };
-                s.expect_next(b'a').map_err(error_handler)?;
-                s.expect_next(b'l').map_err(error_handler)?;
-                s.expect_next(b's').map_err(error_handler)?;
-                s.expect_next(b'e').map_err(error_handler)?;
-                Token::False
-
-                // // TODO peek then next instead?
-                // // Does consuming prematurely matter?
-                // // 2019-07-24: Turns out, yes. This means that I can't use it for certain
-                // // applications like extracting json from a stream of maybe bytes.
-                // if s.check_next(b'a')
-                //     && s.check_next(b'l')
-                //     && s.check_next(b's')
-                //     && s.check_next(b'e')
-                // {
-                //     Token::False
-                // } else {
-                //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Bool));
+                c @ b' ' | c @ b'\n' | c @ b'\t' => Token::Whitespace(c as char),
+                b'-' => {
+                    section_positive_number(s)?;
+                    Token::Number(s.src[start..s.n].into())
+                }
+                b'0' => {
+                    section_number_frac(s)?;
+                    section_number_exp(s)?;
+                    Token::Number(s.src[start..s.n].into())
+                }
+                // Valid number starters
+                b'1'..=b'9' => {
+                    section_digits(s)?;
+                    section_number_frac(s)?;
+                    section_number_exp(s)?;
+                    Token::Number(s.src[start..s.n].into())
+                }
+                // b'-' | b'0'..=b'9' => {
+                //     // TODO is there a way to avoid reprocessing that first byte?
+                //     s.n -= 1;
+                //     let n = s.n;
+                //     section_number(s)?;
+                //     Token::Number(s.src[n..s.n].into())
                 // }
-            }
-            b'[' => Token::ArrayOpen,
-            b']' => Token::ArrayClose,
-            b'{' => Token::ObjectOpen,
-            b'}' => Token::ObjectClose,
-            b':' => Token::Colon,
-            b',' => Token::Comma,
-            e => return Err(TokenizeError::UnexpectedByte(e)),
-        })
+                b'"' => {
+                    section_inside_string(s)?;
+                    Token::String(s.src[start..s.n].into())
+                }
+                b'n' => {
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::Null)
+                            .with_recovery_point(recovery_point)
+                    };
+
+                    s.expect_next(b'u').map_err(error_handler)?;
+                    s.expect_next(b'l').map_err(error_handler)?;
+                    s.expect_next(b'l').map_err(error_handler)?;
+                    Token::Null
+                }
+                b't' => {
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::True)
+                            .with_recovery_point(recovery_point)
+                    };
+                    s.expect_next(b'r').map_err(error_handler)?;
+                    s.expect_next(b'u').map_err(error_handler)?;
+                    s.expect_next(b'e').map_err(error_handler)?;
+                    Token::True
+                }
+                b'f' => {
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::False)
+                            .with_recovery_point(recovery_point)
+                    };
+                    s.expect_next(b'a').map_err(error_handler)?;
+                    s.expect_next(b'l').map_err(error_handler)?;
+                    s.expect_next(b's').map_err(error_handler)?;
+                    s.expect_next(b'e').map_err(error_handler)?;
+                    Token::False
+
+                    // // TODO peek then next instead?
+                    // // Does consuming prematurely matter?
+                    // // 2019-07-24: Turns out, yes. This means that I can't use it for certain
+                    // // applications like extracting json from a stream of maybe bytes.
+                    // if s.check_next(b'a')
+                    //     && s.check_next(b'l')
+                    //     && s.check_next(b's')
+                    //     && s.check_next(b'e')
+                    // {
+                    //     Token::False
+                    // } else {
+                    //     return Err(invalid_input_err_with_context(s.peek(), JsonType::Bool));
+                    // }
+                }
+                b'[' => Token::ArrayOpen,
+                b']' => Token::ArrayClose,
+                b'{' => Token::ObjectOpen,
+                b'}' => Token::ObjectClose,
+                b':' => Token::Colon,
+                b',' => Token::Comma,
+                e => return Err(TokenizeError::UnexpectedByte(e)),
+            })
+        })()
+        .map_err(|e| e.with_token_start(start))
     }
 
     #[inline]
