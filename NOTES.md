@@ -1,0 +1,3 @@
+- https://unhandledexpression.com/general/2019/06/17/nom-5-is-here.html
+	- Streaming parsing ideas.
+	- lexical crate for floating point
