@@ -1,11 +1,12 @@
 #![warn(const_err, clippy::all)]
 
-use parser::section::Section;
+use parser::section::ByteSection;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
 use parser::{JsonPath, JsonPathSegment, JsonType};
 
 use log::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{self, stdin, Read, Write};
 
@@ -17,14 +18,23 @@ enum Error {
     Validation(ValidationError),
 }
 
-#[derive(Default, Debug, derive_more::Display)]
+#[derive(Debug, derive_more::Display)]
 #[display(fmt = r#"{{"url":{},"title":{}}}"#, url, title)]
 struct Output {
     url: String,
     title: String,
 }
 
-fn entrypoint(input: &str) -> Result<(), Error> {
+impl Default for Output {
+    fn default() -> Self {
+        Self {
+            url: r#""""#.into(),
+            title: r#""""#.into(),
+        }
+    }
+}
+
+fn entrypoint(input: &[u8]) -> Result<(), Error> {
     let mut validator = Validator::new();
     let mut last_state = ValidationState::Incomplete;
 
@@ -35,8 +45,8 @@ fn entrypoint(input: &str) -> Result<(), Error> {
 
     let mut outputs: HashMap<JsonPath, Output> = Default::default();
 
-    let mut section = Section::new(input);
-    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
+    let mut section = ByteSection::new(input);
+    while let Ok(token) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }
@@ -204,7 +214,15 @@ fn entrypoint(input: &str) -> Result<(), Error> {
                             /*
                              * SKELETON: Transition from old key to new key. Path is still pointing to the old
                              */
-                            *key = new_key;
+                            // *key = new_key;
+                            *key = match new_key {
+                                Cow::Borrowed(bytes) => {
+                                    Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+                                }
+                                Cow::Owned(bytes) => {
+                                    Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) })
+                                }
+                            }
                         }
                         /*
                          * SKELETON: Entrypoint to new key. Path is updated
@@ -244,8 +262,8 @@ fn entrypoint(input: &str) -> Result<(), Error> {
 fn main() -> Result<(), Error> {
     env_logger::init();
     let mut stdin = stdin();
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
     entrypoint(&buffer)?;
     Ok(())
 }

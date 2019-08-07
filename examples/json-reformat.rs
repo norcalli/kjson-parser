@@ -117,7 +117,13 @@ fn finish_string_token<R: Read, W: Write>(
     }
 }
 
-struct Configuration {}
+struct Configuration {
+    skip_strict_validation: bool,
+}
+
+const CONFIGURATION: Configuration = Configuration {
+    skip_strict_validation: true,
+};
 
 #[derive(Debug)]
 enum CompletionState {
@@ -163,22 +169,13 @@ fn chunked_entrypoint() -> Result<()> {
 
     loop {
         let mut section = buffer.section();
-        dprintln!(
-            "beginning. section.n = {}, section.head = {:?}",
-            section.n,
-            if section.n < section.src.len() {
-                std::str::from_utf8(&section.src[section.n..])
-            } else {
-                Ok("")
-            }
-        );
+        dprintln!("beginning. section = {}", section);
         section.skip(continuation_point);
         let result = (|| -> Result<CompletionState> {
             dprintln!(
-                "continuation = {}, section.start = {:?}",
+                "continuation = {}, section = {}",
                 continuation_point,
-                // std::str::from_utf8(&section.src[section.n..section.src.len().min(section.n + 10)])
-                std::str::from_utf8(&section.src[section.n..])
+                section
             );
             while !section.is_empty() {
                 let token = compress_next_token(&mut section, is_whitespace)?;
@@ -192,23 +189,25 @@ fn chunked_entrypoint() -> Result<()> {
                 last_state = validator.process_token(&token)?;
                 had_tokens = true;
 
-                match token {
-                    Token::String(ref s) => {
-                        let s = std::str::from_utf8(s)?;
-                        json::parse(s).map_err(|_| Error::InvalidString)?;
-                    }
-                    Token::Number(ref s) => {
-                        let s = std::str::from_utf8(s)?;
-                        // TODO check overflow/underflow/etc.
-                        let x: f64 = s.parse()?;
-                        // Extra testing for integers.
-                        if s.find(|c| c == 'e' || c == 'E' || c == '.').is_none()
-                            && x.floor() - x <= std::f64::EPSILON
-                        {
-                            let _: i64 = s.parse()?;
+                if !CONFIGURATION.skip_strict_validation {
+                    match token {
+                        Token::String(ref s) => {
+                            let s = std::str::from_utf8(s)?;
+                            json::parse(s).map_err(|_| Error::InvalidString)?;
                         }
+                        Token::Number(ref s) => {
+                            let s = std::str::from_utf8(s)?;
+                            // TODO check overflow/underflow/etc.
+                            let x: f64 = s.parse()?;
+                            // Extra testing for integers.
+                            if s.find(|c| c == 'e' || c == 'E' || c == '.').is_none()
+                                && x.floor() - x <= std::f64::EPSILON
+                            {
+                                let _: i64 = s.parse()?;
+                            }
+                        }
+                        _ => (),
                     }
-                    _ => (),
                 }
                 token.print(&mut stdout)?;
                 if ValidationState::Complete == last_state {
@@ -217,26 +216,14 @@ fn chunked_entrypoint() -> Result<()> {
                     return Ok(CompletionState::Complete);
                 }
             }
-            dprintln!(
-                "end. section.n = {}, section.head = {:?}",
-                section.n,
-                std::str::from_utf8(&section.src[section.n..])
-            );
+            dprintln!("end. section = {}", section);
             continuation_point = section.n;
             Ok(CompletionState::Incomplete)
         })();
         continuation_point = section.n;
         // drop(section);
 
-        dprintln!(
-            "result. section.n = {}, section.head = {:?}",
-            section.n,
-            if section.n < section.src.len() {
-                std::str::from_utf8(&section.src[section.n..])
-            } else {
-                Ok("")
-            }
-        );
+        dprintln!("result. section = {}", section);
         dprintln!("result = {:?}", result);
 
         match result {

@@ -2,12 +2,12 @@
 
 mod lookup_tables;
 mod utf8;
-pub mod section;
 pub mod tokenizer;
 pub mod validator;
 
 use std::borrow::Cow;
 use std::fmt;
+pub use section;
 
 #[derive(Hash, Eq, PartialEq, Debug, Copy, Clone)]
 pub enum JsonType {

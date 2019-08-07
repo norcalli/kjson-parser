@@ -9,6 +9,7 @@ matches = "0.1.8"
 derive_more = "0.14.0"
 log = "0.4.7"
 derive_deref = "1.1.0"
+section = { path = "../section" }
 
 [dev-dependencies]
 jemallocator = "0.3.2"

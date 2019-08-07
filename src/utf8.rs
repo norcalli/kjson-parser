@@ -1,5 +1,3 @@
-use crate::section::PeekSeek;
-
 const CONT_MASK: u8 = 0b0011_1111;
 const TAG_CONT_U8: u8 = 0b1000_0000;
 const NONASCII_MASK: usize = 0x80808080_80808080u64 as usize;

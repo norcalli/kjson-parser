@@ -239,7 +239,7 @@ pub enum Token<'a> {
 //     Space,
 // }
 
-impl Token<'_> {
+impl<'a> Token<'a> {
     #[inline]
     pub fn into_owned(self) -> Token<'static> {
         match self {
@@ -316,6 +316,37 @@ impl Token<'_> {
             _ => false,
         }
     }
+
+    // #[inline]
+    // pub unsafe fn into_string_unchecked(self) -> Option<Cow<'a, str>> {
+    //     match self {
+    //         // Token::String(c) => Some(c),
+    //         // TODO use unchecked?
+    //         Token::String(c) => Some(match c {
+    //             Cow::Borrowed(bytes) => {
+    //                 Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+    //             }
+    //             Cow::Owned(bytes) => Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) }),
+    //         }),
+    //         _ => None,
+    //     }
+    // }
+
+    // #[inline]
+    // // This assumes that my utf8 validation is correct lmao.
+    // pub fn into_string_unchecked(self) -> Option<Cow<'a, str>> {
+    //     match self {
+    //         // Token::String(c) => Some(c),
+    //         // TODO use unchecked?
+    //         Token::String(c) => Some(match c {
+    //             Cow::Borrowed(bytes) => {
+    //                 Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+    //             }
+    //             Cow::Owned(bytes) => Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) }),
+    //         }),
+    //         _ => None,
+    //     }
+    // }
 
     #[inline]
     pub fn as_string(&self) -> Option<&str> {
@@ -442,9 +473,9 @@ pub mod utils {
     const USE_WHITESPACE_LUT: bool = false;
 
     #[inline]
-    pub fn invalid_input_err(s: Option<&u8>) -> TokenizeError {
+    pub fn invalid_input_err(s: Option<u8>) -> TokenizeError {
         match s {
-            Some(c) => TokenizeError::UnexpectedByte(*c),
+            Some(c) => TokenizeError::UnexpectedByte(c),
             None => TokenizeError::UnexpectedEndOfInput,
         }
     }
@@ -485,8 +516,8 @@ pub mod utils {
 
         // TODO make sure these compile down to the same thing.
         // while let Some(c) = s.peek() {
-        //     // if !DIGIT_TABLE[*c as usize] {
-        //     if !is_digit(*c) {
+        //     // if !DIGIT_TABLE[c as usize] {
+        //     if !is_digit(c) {
         //         break;
         //     }
         //     s.next();
@@ -581,7 +612,7 @@ pub mod utils {
         loop {
             // We only care about escape characters and codepoints for special processing.
             // Otherwise, just skip ahead.
-            s.skip_until(|c| STRING_TERMINALS[*c as usize]);
+            s.skip_until_pattern(|c| STRING_TERMINALS[c as usize]);
 
             let recovery_point = s.n;
             let error_handler = move |e: TokenizeError| {
@@ -614,6 +645,9 @@ pub mod utils {
                             }
                         }
                     }
+                }
+                x if x < 0x20 => {
+                    return Err(TokenizeError::InvalidStringCodepoint(x as u32));
                 }
                 x => {
                     let mut width = utf8::utf8_char_width(x) as usize;
@@ -748,7 +782,7 @@ pub mod utils {
                     let mut n = 1;
                     // TODO I could probs clean this up.
                     while let Some(c) = s.peek() {
-                        if !is_whitespace(*c) {
+                        if !is_whitespace(c) {
                             break;
                         }
                         s.next();
@@ -761,19 +795,37 @@ pub mod utils {
                 }
                 c @ b' ' | c @ b'\n' | c @ b'\t' => Token::Whitespace(c as char),
                 b'-' => {
-                    section_positive_number(s)?;
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::Number)
+                            .with_recovery_point(recovery_point)
+                    };
+
+                    section_positive_number(s).map_err(error_handler)?;
                     Token::Number(s.src[start..s.n].into())
                 }
                 b'0' => {
-                    section_number_frac(s)?;
-                    section_number_exp(s)?;
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::Number)
+                            .with_recovery_point(recovery_point)
+                    };
+
+                    section_number_frac(s).map_err(error_handler)?;
+                    section_number_exp(s).map_err(error_handler)?;
                     Token::Number(s.src[start..s.n].into())
                 }
                 // Valid number starters
                 b'1'..=b'9' => {
-                    section_digits(s)?;
-                    section_number_frac(s)?;
-                    section_number_exp(s)?;
+                    let recovery_point = start;
+                    let error_handler = move |e: TokenizeError| {
+                        e.with_context(TokenContext::Number)
+                            .with_recovery_point(recovery_point)
+                    };
+
+                    section_digits(s).map_err(error_handler)?;
+                    section_number_frac(s).map_err(error_handler)?;
+                    section_number_exp(s).map_err(error_handler)?;
                     Token::Number(s.src[start..s.n].into())
                 }
                 // b'-' | b'0'..=b'9' => {
