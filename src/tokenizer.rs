@@ -66,7 +66,6 @@ pub enum TokenContext {
 //             _ => false,
 //         }
 //     }
-
 //     pub fn is_number(self) -> bool {
 //         match self {
 //             TokenContext::Number
@@ -417,18 +416,6 @@ impl<'a> Token<'a> {
         }
     }
 }
-
-// impl<B: BufferedReader<()>> PeekSeek for B {
-//     type Item = u8;
-//     #[inline]
-//     fn peek(&mut self) -> Option<&u8> {
-//         self.data(1).ok().and_then(|s| s.get(0))
-//     }
-//     #[inline]
-//     fn next(&mut self) -> Option<u8> {
-//         self.consume(1).get(0).copied()
-//     }
-// }
 
 trait TokenizerTape: PeekSeek<Item = u8> {
     #[inline]

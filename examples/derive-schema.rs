@@ -5,12 +5,13 @@
 
 #![warn(const_err, clippy::all)]
 
-use parser::section::Section;
+use parser::section::ByteSection;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
 use parser::{JsonPathSegment, JsonType};
 
 use log::*;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, stdin, stdout, Read, Write};
 
@@ -40,9 +41,9 @@ pub enum JsonSchema {
     Bool,
     Number,
     String,
-    // Depends on maximum cardinality. You could assume it's an enum depending on a user inputted
-    // maximum number which determines if it qualifies to be an enum. However, if your data
-    // samples are too few, then it will be too restrictive. Therefore, such a number must be
+    // Enum depends on maximum cardinality. You could assume it's an enum depending on a user
+    // inputted maximum number which determines if it qualifies to be an enum. However, if your
+    // data samples are too few, then it will be too restrictive. Therefore, such a number must be
     // chosen in consideration of the total number of input samples.
     //
     // Enum {
@@ -126,6 +127,58 @@ impl JsonSchema {
         for part in path {
             debug!("descending into {:?} at {:?}", schema, part,);
             schema = schema.descend(part);
+        }
+        schema
+    }
+
+    pub fn descend_homogeneous(&mut self, path: &JsonPathSegment) -> &mut JsonSchema {
+        match self {
+            JsonSchema::Object {
+                ref mut inner,
+                ref mut key_count,
+                ref mut total_count,
+            } => {
+                let key = path
+                    .as_key()
+                    .expect("path segment must be an object type")
+                    .to_owned();
+                // *key_count.entry(key.clone()).or_default() += 1;
+                // TODO keep unwrap()?
+                inner.entry(key.into_owned()).or_default()
+            }
+            JsonSchema::Array { ref mut inner, .. } => {
+                // TODO keep unwrap()?
+                // If you set index = 0, then you are using the mode where you can treat an array
+                // as a homogeneous array.
+                let index = 0;
+                if index >= inner.len() {
+                    inner.push(Default::default());
+                }
+                &mut inner[index]
+            }
+            JsonSchema::Either(ref mut inner) => {
+                let path_type = if path.is_index() {
+                    JsonType::Array
+                } else {
+                    JsonType::Object
+                };
+                inner
+                    .entry(path_type)
+                    .or_insert_with(|| path_type.into())
+                    .descend_homogeneous(path)
+            }
+            _ => panic!("Cannot descend into not an array or object"),
+        }
+    }
+
+    pub fn descend_path_homogeneous<'a, I: Iterator<Item = &'a JsonPathSegment<'a>>>(
+        &mut self,
+        path: I,
+    ) -> &mut JsonSchema {
+        let mut schema = self;
+        for part in path {
+            debug!("descending into {:?} at {:?}", schema, part,);
+            schema = schema.descend_homogeneous(part);
         }
         schema
     }
@@ -278,7 +331,7 @@ impl JsonSchema {
 ///     like which one leads to a more specific schema. (specificity is a heuristic that I
 ///     think I could make)
 ///
-fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
+fn eager_reformat_entrypoint(input: &[u8], opt: Opt) -> Result<JsonSchema, Error> {
     let mut validator = Validator::new();
     let mut last_state = ValidationState::Incomplete;
 
@@ -290,8 +343,8 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
     // let mut schema_ref = &mut schema;
     // let mut schema_ref_stack: Vec<&mut JsonSchema> = Vec::new();
 
-    let mut section = Section::new(input);
-    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
+    let mut section = ByteSection::new(input);
+    while let Ok(token) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }
@@ -338,7 +391,11 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
             // Empty objects requires all descendents be Either(Null, self)
 
             // let schema = schema.descend_path(path.iter());
-            let schema_ref = schema.descend_path(path.iter());
+            let schema_ref = if opt.homogeneous_arrays {
+                schema.descend_path_homogeneous(path.iter())
+            } else {
+                schema.descend_path(path.iter())
+            };
 
             // if let Some(JsonType::Object) | Some(JsonType::Array) = token.value_type() {
             //     match schema_ref {
@@ -386,7 +443,11 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
             path.pop();
             // schema_ref = schema.descend_path(path.iter());
             // schema_ref = schema_ref_stack.pop().unwrap();
-            let schema_ref = schema.descend_path(path.iter());
+            let schema_ref = if opt.homogeneous_arrays {
+                schema.descend_path_homogeneous(path.iter())
+            } else {
+                schema.descend_path(path.iter())
+            };
             match schema_ref {
                 JsonSchema::Array {
                     ref mut inner,
@@ -470,7 +531,12 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
         match validator.current_context() {
             Some(ValidationContext::ObjectStart) => {
                 path.push(JsonPathSegment::Key("".into()));
-                let schema_ref = schema.descend_path(path[..path.len() - 1].iter());
+                let path_iter = path[..path.len() - 1].iter();
+                let schema_ref = if opt.homogeneous_arrays {
+                    schema.descend_path_homogeneous(path_iter)
+                } else {
+                    schema.descend_path(path_iter)
+                };
                 if let Some(JsonSchema::Object {
                     inner,
                     ref mut key_count,
@@ -489,8 +555,21 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
             }
             Some(ValidationContext::ObjectEntryKey) => {
                 if let Token::String(new_key) = token {
+                    let new_key = match new_key {
+                        Cow::Borrowed(bytes) => {
+                            Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+                        }
+                        Cow::Owned(bytes) => {
+                            Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) })
+                        }
+                    };
                     // TODO this is doodoo
-                    let schema_ref = schema.descend_path(path[..path.len() - 1].iter());
+                    let path_iter = path[..path.len() - 1].iter();
+                    let schema_ref = if opt.homogeneous_arrays {
+                        schema.descend_path_homogeneous(path_iter)
+                    } else {
+                        schema.descend_path(path_iter)
+                    };
                     if let Some(JsonSchema::Object {
                         inner,
                         ref mut key_count,
@@ -527,9 +606,11 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
                 // schema_ref.descend(&JsonPathSegment::Index(0));
             }
             Some(ValidationContext::ArrayValue) => {
+                // if !opt.homogeneous_arrays {
                 if let Some(JsonPathSegment::Index(ref mut n)) = path.last_mut() {
                     *n += 1;
                 }
+                // }
             }
             _ => (),
         }
@@ -538,12 +619,21 @@ fn eager_reformat_entrypoint(input: &str) -> Result<JsonSchema, Error> {
     Ok(schema)
 }
 
+use structopt::StructOpt;
+
+#[derive(StructOpt)]
+struct Opt {
+    #[structopt(short = "a", long)]
+    homogeneous_arrays: bool,
+}
+
 fn main() -> Result<(), Error> {
     env_logger::init();
+    let opt = Opt::from_args();
     let mut stdin = stdin();
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
-    let schema = eager_reformat_entrypoint(&buffer)?;
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
+    let schema = eager_reformat_entrypoint(&buffer, opt)?;
     println!("Schema: {:#?}", schema);
     Ok(())
 }

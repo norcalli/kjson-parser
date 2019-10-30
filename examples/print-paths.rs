@@ -5,11 +5,12 @@
 
 #![warn(const_err, clippy::all)]
 
-use parser::section::Section;
+use parser::section::ByteSection;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationContext, ValidationError, ValidationState, Validator};
 use parser::JsonPathSegment;
 
+use std::borrow::Cow;
 use std::io::{self, stdin, stdout, Read, Write};
 
 use derive_more::From;
@@ -35,7 +36,7 @@ enum Error {
 
 // impl Traverser {}
 
-fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
+fn eager_reformat_entrypoint(input: &[u8]) -> Result<(), Error> {
     let mut stdout = stdout();
     // let mut stdout = stdout.lock();
     // let mut stdout = io::BufWriter::new(stdout);
@@ -46,8 +47,8 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
 
     let mut path = Vec::new();
 
-    let mut section = Section::new(input);
-    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
+    let mut section = ByteSection::new(input);
+    while let Ok(token) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }
@@ -135,6 +136,14 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
             Some(ValidationContext::ObjectStart) => path.push(JsonPathSegment::Key("".into())),
             Some(ValidationContext::ObjectEntryKey) => {
                 if let Token::String(key) = token {
+                    let key = match key {
+                        Cow::Borrowed(bytes) => {
+                            Cow::Borrowed(unsafe { std::str::from_utf8_unchecked(bytes) })
+                        }
+                        Cow::Owned(bytes) => {
+                            Cow::Owned(unsafe { String::from_utf8_unchecked(bytes) })
+                        }
+                    };
                     if let Some(JsonPathSegment::Key(ref mut path)) = path.last_mut() {
                         *path = key;
                     }
@@ -158,7 +167,7 @@ fn eager_reformat_entrypoint(input: &str) -> Result<(), Error> {
 
 fn main() -> Result<(), Error> {
     let mut stdin = stdin();
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
     eager_reformat_entrypoint(&buffer)
 }

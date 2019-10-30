@@ -5,7 +5,7 @@
 
 #![warn(const_err)]
 
-use parser::section::Section;
+use parser::section::ByteSection;
 use parser::tokenizer::{compress_next_token, utils::is_whitespace, Token};
 use parser::validator::{ValidationError, ValidationState, Validator};
 
@@ -39,7 +39,7 @@ struct Traverser {
 
 impl Traverser {}
 
-fn eager_reformat_entrypoint<'a>(input: &'a str) -> Result<(), Error> {
+fn eager_reformat_entrypoint<'a>(input: &'a [u8]) -> Result<(), Error> {
     let stdout = stdout();
     let stdout = stdout.lock();
     let mut stdout = io::BufWriter::new(stdout);
@@ -47,8 +47,8 @@ fn eager_reformat_entrypoint<'a>(input: &'a str) -> Result<(), Error> {
 
     let mut tokens: Vec<Token<'a>> = Vec::new();
 
-    let mut section = Section::new(input);
-    while let Ok(Some(token)) = compress_next_token(&mut section, is_whitespace) {
+    let mut section = ByteSection::new(input);
+    while let Ok(token) = compress_next_token(&mut section, is_whitespace) {
         if token.is_whitespace() {
             continue;
         }
@@ -74,8 +74,8 @@ fn eager_reformat_entrypoint<'a>(input: &'a str) -> Result<(), Error> {
 
 fn main() -> Result<(), Error> {
     let mut stdin = stdin();
-    let mut buffer = String::new();
-    stdin.read_to_string(&mut buffer)?;
+    let mut buffer = Vec::new();
+    stdin.read_to_end(&mut buffer)?;
     eager_reformat_entrypoint(&buffer)
 }
 
