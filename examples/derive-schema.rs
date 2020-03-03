@@ -21,6 +21,7 @@ use derive_more::From;
 enum Error {
     Io(std::io::Error),
     Validation(ValidationError),
+    Options(kargs::Error),
 }
 
 // Look at other combinators for inspiration on how to do
@@ -331,7 +332,7 @@ impl JsonSchema {
 ///     like which one leads to a more specific schema. (specificity is a heuristic that I
 ///     think I could make)
 ///
-fn eager_reformat_entrypoint(input: &[u8], opt: Opt) -> Result<JsonSchema, Error> {
+fn derive_schema(input: &[u8], opt: Opt) -> Result<JsonSchema, Error> {
     let mut validator = Validator::new();
     let mut last_state = ValidationState::Incomplete;
 
@@ -619,21 +620,42 @@ fn eager_reformat_entrypoint(input: &[u8], opt: Opt) -> Result<JsonSchema, Error
     Ok(schema)
 }
 
-use structopt::StructOpt;
-
-#[derive(StructOpt)]
+#[derive(Debug, Default)]
 struct Opt {
-    #[structopt(short = "a", long)]
     homogeneous_arrays: bool,
+}
+
+fn parse_options() -> kargs::Result<Opt> {
+    use kargs::*;
+    let mut opt = Opt::default();
+    for arg in ParserOptions::default()
+        .need("a", Type::Bool)
+        .need("homogeneous-arrays", Type::Bool)
+        .build_from_args()
+    {
+        let arg = arg?;
+        use EmittedRef::*;
+        match arg.as_ref() {
+            Named("a", Value::Bool(v)) | Named("homogeneous-arrays", Value::Bool(v)) => {
+                if opt.homogeneous_arrays {
+                    return Err(arg.was_duplicate());
+                }
+                opt.homogeneous_arrays = *v;
+            }
+            _ => return Err(arg.was_extra()),
+        }
+    }
+    Ok(opt)
 }
 
 fn main() -> Result<(), Error> {
     env_logger::init();
-    let opt = Opt::from_args();
+
+    let opt = parse_options()?;
     let mut stdin = stdin();
     let mut buffer = Vec::new();
     stdin.read_to_end(&mut buffer)?;
-    let schema = eager_reformat_entrypoint(&buffer, opt)?;
+    let schema = derive_schema(&buffer, opt)?;
     println!("Schema: {:#?}", schema);
     Ok(())
 }

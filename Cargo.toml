@@ -12,11 +12,10 @@ derive_deref = "1.1.0"
 section = { path = "../section" }
 
 [dev-dependencies]
-jemallocator = "0.3.2"
 env_logger = "0.6.2"
 json = "0.11.14"
 koption_macros = "0.1.1"
-structopt = "0.3.0"
+kargs = "0.1"
 
 [profile.release]
 lto = true
