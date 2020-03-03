@@ -358,6 +358,23 @@ impl<'a> Token<'a> {
     }
 
     #[inline]
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Token::True => Some(true),
+            Token::False => Some(false),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn as_number(&self) -> Option<&[u8]> {
+        match self {
+            Token::Number(x) => Some(&x),
+            _ => None,
+        }
+    }
+
+    #[inline]
     /// Returns true if this can be matched completely, but that
     /// match could be a false positive. Meaning that if you actually
     /// had more data incoming, you should restart the token matching
