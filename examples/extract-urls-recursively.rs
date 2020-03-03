@@ -8,6 +8,7 @@ use parser::{JsonPath, JsonPathSegment, JsonType};
 use log::*;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt;
 use std::io::{self, stdin, Read, Write};
 
 use derive_more::From;
@@ -18,19 +19,26 @@ enum Error {
     Validation(ValidationError),
 }
 
-#[derive(Debug, derive_more::Display)]
-#[display(fmt = r#"{{"url":{},"title":{}}}"#, url, title)]
+#[derive(Debug, Default)]
 struct Output {
-    url: String,
-    title: String,
+    url: Option<String>,
+    title: Option<String>,
 }
 
-impl Default for Output {
-    fn default() -> Self {
-        Self {
-            url: r#""""#.into(),
-            title: r#""""#.into(),
-        }
+impl fmt::Display for Output {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            fmt,
+            r#"{{"url":{},"title":{}}}"#,
+            self.url.as_ref().unwrap(),
+            self.title.as_ref().unwrap()
+        )
+    }
+}
+
+impl Output {
+    fn is_invalid(&self) -> bool {
+        self.url.is_none() || self.title.is_none()
     }
 }
 
@@ -43,7 +51,34 @@ fn entrypoint(input: &[u8]) -> Result<(), Error> {
 
     let mut path: Vec<JsonPathSegment> = Vec::new();
 
+    // TODO(ashkan): make the output ordered.
     let mut outputs: HashMap<JsonPath, Output> = Default::default();
+    let mut ordering: Vec<JsonPath> = Vec::new();
+
+    macro_rules! flush_outputs {
+        () => {
+            for key in ordering.drain(..) {
+                let output = &outputs[&key];
+                if !output.is_invalid() {
+                    writeln!(stdout, "{}", output)?;
+                }
+            }
+            outputs.clear();
+        };
+    }
+
+    macro_rules! lookup_output {
+        ($key:expr) => {{
+            use std::collections::hash_map::Entry;
+            match outputs.entry($key) {
+                Entry::Occupied(occupied) => occupied.into_mut(),
+                Entry::Vacant(vacant) => {
+                    ordering.push(vacant.key().clone());
+                    vacant.insert(Default::default())
+                }
+            }
+        }};
+    }
 
     let mut section = ByteSection::new(input);
     while let Ok(token) = compress_next_token(&mut section, is_whitespace) {
@@ -55,12 +90,7 @@ fn entrypoint(input: &[u8]) -> Result<(), Error> {
         last_state = validator.process_token(&token)?;
 
         if last_state == ValidationState::Complete {
-            for output in outputs.values() {
-                if !output.url.is_empty() {
-                    writeln!(stdout, "{}", output)?;
-                }
-            }
-            outputs.clear();
+            flush_outputs!();
         }
 
         /*
@@ -153,13 +183,12 @@ fn entrypoint(input: &[u8]) -> Result<(), Error> {
             if let Some(key) = display_path.last().and_then(|p| p.as_key()) {
                 if key == r#""url""# {
                     if let Some(url) = token.as_string() {
-                        let output = outputs.entry(display_path.parent()).or_default();
-                        output.url = url.to_owned();
+                        // TODO(ashkan): check if url is already set?
+                        lookup_output!(display_path.parent()).url = Some(url.to_owned());
                     }
                 } else if key == r#""title""# {
                     if let Some(title) = token.as_string() {
-                        let output = outputs.entry(display_path.parent()).or_default();
-                        output.title = title.to_owned();
+                        lookup_output!(display_path.parent()).title = Some(title.to_owned());
                     }
                 }
             }
@@ -251,11 +280,7 @@ fn entrypoint(input: &[u8]) -> Result<(), Error> {
     }
     validator.finish()?;
 
-    for output in outputs.values() {
-        if !output.url.is_empty() {
-            writeln!(stdout, "{}", output)?;
-        }
-    }
+    flush_outputs!();
     Ok(())
 }
 
